@@ -105,6 +105,7 @@ set(HESA_CORE_SRCS
 
     # Engine (Phase 1: basic generation loop)
     src/engine.cpp
+    src/transformer_block.cpp
 )
 
 if(HESA_ENABLE_CUDA)

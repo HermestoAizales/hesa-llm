@@ -2,6 +2,7 @@
 #define HESA_ENGINE_HPP
 
 #include "hesa/backend.hpp"
+#include "hesa/kv_cache.hpp"
 #include "hesa/model.hpp"
 #include "hesa/result.hpp"
 #include "hesa/sampling.hpp"
@@ -15,15 +16,15 @@
 
 namespace hesa {
 
-// ─── Forward pass state ──────────────────────────────────────────
+struct LayerBuffers;
+
 struct InferenceState {
-    std::vector<float> logits;       // [vocab_size]
-    std::vector<int32_t> generated;  // tokens generated so far
+    std::vector<float> logits;
+    std::vector<int32_t> generated;
     int32_t last_token = -1;
     bool    done       = false;
 };
 
-// ─── Engine ───────────────────────────────────────────────────────
 class Engine {
 public:
     struct Config {
@@ -33,36 +34,25 @@ public:
         GenerationConfig sampling;
     };
 
-    /** Load model, create backend, and initialise an engine. */
     static Result<std::unique_ptr<Engine>> create(const std::string& model_path,
                                                   const Config& cfg);
 
     ~Engine();
 
-    /** Generate tokens from a tokenised prompt. Returns the full output sequence. */
     Result<std::vector<int32_t>> generate(std::span<const int32_t> prompt,
                                           size_t max_tokens,
                                           float temperature,
                                           float top_p);
 
-    /** Stop an in-progress generation (thread-safe). */
     Result<void> stop();
 
-    /** Access the loaded model metadata. */
     const ModelMetadata& metadata() const { return model_->metadata(); }
-
-    /** Access the model (for advanced usage). */
     const Model& model() const { return *model_; }
 
-    // Public constructor for make_unique access (only create() should call this).
-    Engine() = default;
-
-    // --- Phase-1 forward pass (embedding → simple layer → LM head) ---
     Result<void> forward_single_token(int32_t token_id,
                                       int32_t position,
                                       std::vector<float>& out_hidden);
 
-    // --- Logits from hidden state via output embedding ---
     Result<void> compute_logits(const std::vector<float>& hidden,
                                 std::vector<float>& logits_out);
 
@@ -70,13 +60,16 @@ public:
     std::unique_ptr<Backend>   backend_;
     std::unique_ptr<Tokenizer> tokenizer_;
 
-    std::atomic<bool> stop_requested_{false};
+    KVCache*                   kv_cache_ = nullptr;
+    std::vector<LayerBuffers>  layer_bufs_;
+    int32_t                    position_counter_ = 0;
+    std::atomic<bool>          stop_requested_{false};
+    std::vector<float>         hidden_buf_;
+    std::vector<float>         logits_buf_;
 
-    // Working buffers (re-used each step to avoid allocations)
-    std::vector<float> hidden_buf_;
-    std::vector<float> logits_buf_;
+private:
+    Engine();
 };
 
 } // namespace hesa
-
-#endif // HESA_ENGINE_HPP
+#endif
