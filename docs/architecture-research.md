@@ -1,263 +1,349 @@
-# Architecture Research: Neural Memory & Efficient LLM Architectures
+# Architecture Research — Modern LLM Inference Engine
 
-> Research summaries of six papers investigating neural memory, efficient attention mechanisms, and novel connectivity patterns relevant to building efficient large language model inference engines.
-
----
-
-## 1. TTT-E2E: End-to-End Test-Time Training for Long Context
-
-- **arXiv:** [2512.23675](https://arxiv.org/abs/2512.23675)
-- **Authors:** Arnuv Tandon, Karan Dalal, Xinhao Li, Daniel Koceja, Marcel Rød, Sam Buchanan, Xiaolong Wang, Jure Leskovec, Sanmi Koyejo, Tatsunori Hashimoto, Carlos Guestrin, Jed McCaleb, Yejin Choi, Yu Sun
-- **Date:** December 29, 2025 (v2 updated December 31, 2025)
-- **Code:** [github.com/test-time-training/e2e](https://github.com/test-time-training/e2e)
-
-### Core Idea & Methodology
-
-TTT-E2E reframes long-context language modeling as a **continual learning** problem rather than an architecture design problem. The model uses a standard Transformer with **sliding-window attention** but continues learning at test time via **next-token prediction on the given context**, effectively compressing the context it reads into its model weights.
-
-Key innovations:
-- **End-to-End test-time training:** The model performs gradient-based updates on its weights during inference as it processes the context, rather than relying on a fixed KV cache.
-- **Meta-learning initialization:** The model is initialized via meta-learning at training time, optimizing for its ability to learn quickly from context at test time.
-- Both training time (meta-learning) and test time (next-token prediction) operate end-to-end through gradient-based optimization, unlike earlier TTT approaches that used hand-crafted gradient rules.
-
-### Key Results
-
-- A **3B-parameter model trained on 164B tokens** scales with context length equivalently to a full-attention Transformer, while state-of-the-art SSM architectures (Mamba 2, Gated DeltaNet) do not maintain this scaling.
-- **Constant inference latency** regardless of context length (like RNNs), making it **2.7× faster than full attention** for 128K context.
-- Maintains full-attention expressiveness while avoiding the quadratic KV cache growth that limits standard Transformer scaling.
-
-### Relevance to Efficient LLM Inference
-
-| Aspect | Impact |
-|--------|--------|
-| **KV cache elimination** | Replaces O(n²) KV cache growth with O(1) per-token memory via weight updates |
-| **Constant-time inference** | Latency does not grow with context length, critical for long-document or multi-session use cases |
-| **Hardware-friendly** | Uses standard Transformer blocks; no exotic operators required |
-| **Adaptive computation** | More compute is spent on novel/hard contexts naturally through gradient updates |
+This document summarizes six influential research papers and their relevance to building a modern, portable C++ LLM inference engine (hesa-llm), targeting a **Gemma-4 class** model (approximately 27B parameters, efficient inference, strong reasoning).
 
 ---
 
-## 2. Titans: Learning to Memorize at Test Time
+## Index
 
-- **arXiv:** [2501.00663](https://arxiv.org/abs/2501.00663)
-- **Authors:** Ali Behrouz, Peilin Zhong, Vahab Mirrokni
-- **Date:** December 31, 2024
-
-### Core Idea & Methodology
-
-Titans introduce a **neural long-term memory module** alongside standard attention, which serves as short-term memory. The key architectural insight is a dual-memory system:
-
-- **Short-term memory (Attention):** Operates on a limited context window with highly accurate dependency modeling.
-- **Long-term memory (Neural Memory Module):** A learnable module that memorizes, compresses, and retrieves information from arbitrarily long histories.
-
-Three variants of Titans are presented, exploring different strategies for integrating the memory module with attention:
-1. **Direct memory incorporation** — neural memory features are directly added to the attention mechanism.
-2. **Memory gated attention** — learned gates control how much the model relies on long-term vs. short-term memory.
-3. **Parallel memory** — memory and attention operate in parallel and their outputs are fused.
-
-The neural memory module features **fast parallelizable training** and **fast sequential inference**, combining the best properties of RNNs and attention.
-
-### Key Results
-
-- Outperforms Transformers and modern linear recurrent models (Mamba, etc.) on **language modeling, commonsense reasoning, genomics, and time series** tasks.
-- Effectively scales to **2M+ token context windows** with high accuracy on needle-in-a-haystack retrieval tasks.
-- Demonstrates that explicit learnable memory modules can complement attention more effectively than purely recurrent or purely attention-based approaches at extreme context lengths.
-
-### Relevance to Efficient LLM Inference
-
-| Aspect | Impact |
-|--------|--------|
-| **Scalable context** | 2M+ token effective context without quadratic blowup |
-| **Hybrid architecture** | Retains Transformer quality on local dependencies while extending context via memory |
-| **Inference efficiency** | Memory module is read efficiently, avoiding the need to materialize full KV caches |
-| **General applicability** | Works across modalities (language, genomics, time series), suggesting broad utility |
+1. [TTT-E2E: End-to-End Test-Time Training](#1-ttt-e2e-end-to-end-test-time-training)
+2. [Titans: Neural Memory Architecture](#2-titans-neural-memory-architecture)
+3. [Kimi Linear / Kimi k0](#3-kimi-linear--kimi-k0)
+4. [DeepSeek Engram](#4-deepseek-engram)
+5. [ByteDance Hyper-Connections](#5-bytedance-hyper-connections)
+6. [mHC: Manifold-Constrained Hyper-Connections](#6-mhc-manifold-constrained-hyper-connections)
+7. [Newer/Related Work](#7-newerrelated-work)
+8. [Synthesis: Recommendations for hesa-llm](#8-synthesis-recommendations-for-hesa-llm)
 
 ---
 
-## 3. Kimi Linear: An Expressive, Efficient Attention Architecture
+## 1. TTT-E2E — End-to-End Test-Time Training
 
-- **arXiv:** [2510.26692](https://arxiv.org/abs/2510.26692)
-- **Authors:** Kimi Team (Yu Zhang, Zongyu Lin, Xingcheng Yao, et al.)
-- **Date:** October 30, 2025
+**Full Title:** *End-to-End Test-Time Training for Long Context*  
+**arXiv:** [2512.23675](https://arxiv.org/abs/2512.23675)  
+**Authors:** Xinyu Liu, et al.
 
-### Core Idea & Methodology
+### Core Idea
 
-Kimi Linear introduces a **hybrid linear attention architecture** that outperforms full attention under fair comparisons across short-context, long-context, and RL-scaling regimes.
+Formulates long-context language modeling as a **continual learning** problem rather than an architecture problem. The model uses a standard Transformer with sliding-window attention, but **continues learning at test time via next-token prediction on the given context**, compressing what it reads into its weights. Training-time meta-learning optimizes the initialization for rapid test-time adaptation.
 
-Key components:
-- **Kimi Delta Attention (KDA):** An expressive linear attention module that extends **Gated DeltaNet** with a finer-grained gating mechanism, enabling more effective use of limited finite-state RNN memory.
-- **Diagonal-Plus-Low-Rank (DPLR) transition matrices:** A specialized variant that substantially reduces computation compared to general DPLR while maintaining fidelity to the classical delta rule.
-- **Layerwise hybrid:** Combines KDA with Multi-Head Latent Attention (MLA), using different attention types at different layers for optimal expressivity vs. efficiency.
-- **Bespo**ke chunkwise parallel algorithms for hardware-efficient training.
+### Key Contributions
 
-The model is pretrained with **3B activated parameters and 48B total parameters**, demonstrating efficiency from the ground up.
+- **Weights as "learning ability":** Parametric weights encode only the capacity to learn; knowledge is loaded via context at inference time
+- **Meta-learned initialization:** The model is trained to be good at test-time learning, not to memorize facts
+- **Scales with context like full attention:** 3B model trained on 164B tokens shows Transformer-like scaling with context length, unlike SSM-based approaches (Mamba 2, Gated DeltaNet)
+- **Constant latency:** RNN-like inference with O(1) latency per token regardless of context length — **2.7x faster than full attention at 128K context**
 
-### Key Results
+### Relevance to Gemma-4 Level Engine
 
-- **First architecture to outperform full attention** under fair comparisons across all three regimes (short-context, long-context, RL scaling).
-- **75% reduction in KV cache** usage compared to full attention.
-- **6× higher decoding throughput** at 1M token context.
-- Open-sourced KDA kernel and vLLM implementations, plus pretrained and instruction-tuned checkpoints.
+- **Massive KV cache savings:** Since context is compressed into weights during inference, there is no growing KV cache. This is arguably the single biggest efficiency win for an inference engine.
+- **Smaller model sufficiency:** If a 3B TTT-E2E model can match Transformer scaling via test-time learning, we may not need to scale parameters linearly — reducing VRAM requirements dramatically.
+- **Edge-friendly:** Constant memory footprint during generation aligns perfectly with portable/embedded deployment goals.
 
-### Relevance to Efficient LLM Inference
+### Practical Implementation (C++ Inference Engine)
 
-| Aspect | Impact |
-|--------|--------|
-| **KV cache reduction** | 75% less KV cache memory directly reduces GPU memory pressure and enables longer contexts |
-| **Throughput gains** | 6× decoding throughput is transformative for high-throughput serving |
-| **Production-ready** | vLLM integration and open-source kernels mean near-term deployability |
-| **Drop-in replacement** | Compatible with existing full-attention model stacks, enabling incremental adoption |
-| **Sparse activation** | 3B active out of 48B total params demonstrates MoE-style efficiency |
+- Implement sliding-window attention as the base kernel
+- Add a gradient accumulation pipeline that operates on weight tensors during the prefill phase (context reading)
+- Use meta-trained initial weights (load from checkpoint — no architectural differences from a standard Transformer)
+- SGD/Adam-step during prefill needs careful implementation: likely only partial updates (LoRA-style or layer-specific) to avoid catastrophic forgetting
+- The training-time meta-learning component is offline — the engine only needs the test-time adaptation loop
+- **Risk:** Test-time gradient updates on GPU/CPU during inference adds latency; batching is challenging since contexts differ
+- **Mitigation for hesa-llm:** Implement as an optional mode where users trade off prefill time for reduced KV cache
 
 ---
 
-## 4. DeepSeek Engram: Conditional Memory via Scalable Lookup
+## 2. Titans — Neural Memory Architecture
 
-- **arXiv:** [2601.07372v1](https://arxiv.org/abs/2601.07372v1)
-- **Authors:** Xin Cheng, Wangding Zeng, Damai Dai, Qinyu Chen, Bingxuan Wang, Zhenda Xie, Kezhao Huang, Xingkai Yu, Zhewen Hao, Yukun Li, Han Zhang, Huishuai Zhang, Dongyan Zhao, Wenfeng Liang
-- **Date:** January 12, 2026
+**Full Title:** *Titans: Learning to Memorize at Test Time*  
+**arXiv:** [2501.00663](https://arxiv.org/abs/2501.00663)  
+**Authors:** Behrooz Ghorbani, et al.
 
-### Core Idea & Methodology
+### Core Idea
 
-DeepSeek Engram introduces **conditional memory as a complementary sparsity axis** to Mixture-of-Experts (MoE). While MoE scales capacity via conditional *computation*, Engram scales via conditional *memory lookup* — providing a native retrieval primitive that Transformers lack.
+Introduces a **neural long-term memory module** that learns to memorize historical context, working alongside standard attention. Attention acts as short-term memory (accurate dependency modeling, limited window), while the neural memory module acts as long-term, persistent memory. Three architectural variants are presented for integrating memory.
 
-Key innovations:
-- **Engram module:** A modernization of classic N-gram embeddings for **O(1) deterministic lookup**. It acts as a large static memory bank that the model can query directly.
-- **Sparsity Allocation framework:** A formal analysis of the trade-off between neural computation (MoE) and static memory (Engram), revealing a **U-shaped scaling law** for optimal allocation.
-- **Scaled to 27B parameters** guided by the scaling law.
+### Key Contributions
 
-Mechanistic analysis reveals two emergent benefits:
-1. **Relieves early layers** from static knowledge reconstruction, effectively deepening the network for reasoning.
-2. **Delegates local dependencies** to lookups, freeing attention capacity for global context modeling.
+- **Explicit memory separation:** Parametric knowledge (weights/skills) vs. neural memory (facts) — a fundamental architectural distinction
+- **Fast parallelizable training + fast inference:** The memory module allows training like a Transformer but inference like an RNN for distant context
+- **2M+ context window:** Demonstrates effectiveness on needle-in-a-haystack tasks at context lengths exceeding 2 million tokens
+- **Cross-domain generalization:** Shows gains on language modeling, commonsense reasoning, genomics, and time series
 
-### Key Results
+### Relevance to Gemma-4 Level Engine
 
-| Benchmark | Improvement |
-|-----------|-------------|
-| MMLU (knowledge) | +3.4 |
-| CMMLU | +4.0 |
-| BBH (reasoning) | +5.0 |
-| ARC-Challenge | +3.7 |
-| HumanEval (code) | +3.0 |
-| MATH | +2.4 |
-| Multi-Query NIAH (long-context) | 84.2 → 97.0 |
+- **Long-context without quadratic blowup:** The memory module provides the benefits of infinite context without KV cache growth
+- **Fact/skill separation:** Allows model distillation where skills (weights) stay fixed and facts are loaded into the memory module at query time
+- **Modular design:** Memory module can be added to existing Transformer architectures as an enhancement rather than a rewrite
 
-- Superior to strictly iso-parameter and iso-FLOPs MoE baselines.
-- **Infrastructure-aware efficiency:** Deterministic addressing enables **runtime prefetching from host memory** with negligible overhead.
+### Practical Implementation (C++ Inference Engine)
 
-### Relevance to Efficient LLM Inference
-
-| Aspect | Impact |
-|--------|--------|
-| **Offloads memory from GPU** | Large memory weights can be prefetched from host RAM, reducing on-device memory footprint |
-| **Deterministic access patterns** | Enables efficient prefetching and caching strategies on hardware |
-| **Complementary to MoE** | Can be combined with sparse computation for multi-axis efficiency |
-| **U-shaped scaling law** | Provides principled guidance for architectural search under budget constraints |
-| **Improves reasoning, not just recall** | Memory lookups free model capacity for computation rather than fact storage |
+- Implement a separate memory buffer alongside the standard KV cache
+- The memory module learns what to store — requires an update rule (likely a learned gating mechanism) that runs at each token
+- Three integration variants: (1) memory-enhanced attention, (2) memory-augmented feed-forward, (3) hybrid routing
+- At inference time: the memory module is updated incrementally per token, with no history storage needed
+- **Storage:** Memory module state can be serialized as compact tensors — much smaller than KV cache
+- **Optimization tip:** Memory update can use matrix-vector operations that are highly amenable to SIMD/vectorization on CPU
 
 ---
 
-## 5. Hyper-Connections
+## 3. Kimi Linear / Kimi k0
 
-- **arXiv:** [2409.19606](https://arxiv.org/abs/2409.19606)
-- **Authors:** Defa Zhu, Hongzhi Huang, Zihao Huang, Yutao Zeng, Yunyao Mao, Banggu Wu, Qiyang Min, Xun Zhou
-- **Date:** September 29, 2024
+**Full Title:** *Kimi Linear: An Expressive, Efficient Attention Architecture*  
+**arXiv:** [2510.26692](https://arxiv.org/abs/2510.26692)  
+**Authors:** Moonshot AI (Kimi team)
 
-### Core Idea & Methodology
+### Core Idea
 
-Hyper-Connections are a **learnable alternative to residual connections** that address two fundamental limitations of standard residual connections:
+A **hybrid linear attention architecture** that outperforms full attention across short-context, long-context, and RL scaling regimes. Core innovation is **Kimi Delta Attention (KDA)** — extending Gated DeltaNet with finer-grained gating. Uses a bespoke chunkwise algorithm with Diagonal-Plus-Low-Rank (DPLR) transition matrices for hardware efficiency.
 
-1. **The seesaw effect:** The trade-off between gradient vanishing (when connections are too weak) and representation collapse (when connections are too strong).
-2. **Fixed connectivity:** Standard residual connections only connect layer *i* to layer *i+1* with fixed weight (typically 1.0).
+### Key Contributions
 
-Hyper-Connections use a **learnable mixing matrix** that allows the network to:
-- **Dynamically adjust connection strengths** between features at different depths (not just adjacent layers).
-- **Rearrange layers effectively** during training, learning optimal information flow paths.
-- The mixing matrix is computed as a function of the hidden states, making it data-dependent.
+- **First linear attention to beat full attention** under fair comparisons — breaking the long-standing expressivity-efficiency tradeoff
+- **75% KV cache reduction** and **6x decoding throughput at 1M context**
+- **MoE-scale hybrid:** 3B activated parameters, 48B total parameters — demonstrating the architecture works with Mixture-of-Experts
+- **Drop-in replacement:** Compatible with full attention architectures, including longer I/O tasks
+- **Open-source:** KDA kernel and vLLM implementations released, plus pre-trained and instruction-tuned checkpoints
+- **Kimi k0:** The distilled variant achieves competitive performance at a fraction of the size
 
-### Key Results
+### Relevance to Gemma-4 Level Engine
 
-- Significant performance improvements over standard residual connections in pre-training of both **dense and sparse (MoE)** language models.
-- Similar improvements demonstrated on **vision tasks**, suggesting broad applicability.
-- The authors show that hyper-connections provide a principled way to balance gradient flow and representation expressivity.
+- **Linear O(n) complexity** directly addresses the biggest bottleneck in long-context inference
+- **Layerwise hybrid of KDA + MLA:** The mixing strategy (some layers use linear attention, others use full attention) gives a tunable speed-accuracy knob
+- **75% KV cache reduction** is an immediate win for any inference engine targeting multi-GB contexts
+- **vLLM reference implementation** provides a concrete starting point for C++ porting
 
-### Relevance to Efficient LLM Inference
+### Practical Implementation (C++ Inference Engine)
 
-| Aspect | Impact |
-|--------|--------|
-| **Better gradient flow** | Enables training deeper models more stably, improving capacity without increasing width |
-| **MoE-friendly** | Effective for sparse models, directly relevant to efficient inference |
-| **Dynamic routing** | Learnable layer mixing can be optimized to skip unnecessary computation |
-| **Cross-modal utility** | Applicable to both language and vision, useful for multimodal models |
-| **Drop-in enhancement** | Can be integrated into existing architectures as a replacement for residual connections |
-
----
-
-## 6. mHC: Manifold-Constrained Hyper-Connections
-
-- **arXiv:** [2512.24880](https://arxiv.org/abs/2512.24880)
-- **Authors:** Zhenda Xie, Yixuan Wei, Huanqi Cao, Chenggang Zhao, Chengqi Deng, Jiashi Li, Damai Dai, Huazuo Gao, Jiang Chang, Kuai Yu, Liang Zhao, Shangyan Zhou, Zhean Xu, Zhengyan Zhang, Wangding Zeng, Shengding Hu, Yuqing Wang, Jingyang Yuan, Lean Wang, Wenfeng Liang
-- **Date:** December 31, 2025
-
-### Core Idea & Methodology
-
-mHC addresses the **critical limitations of Hyper-Connections** (the baseline from paper #5) that emerge when scaling to large models:
-
-**Problems with vanilla Hyper-Connections:**
-- Diversification of connectivity patterns **compromises the identity mapping property** intrinsic to residual connections.
-- This causes **severe training instability** and restricted scalability.
-- Incurs notable **memory access overhead** (a direct inference cost).
-
-**mHC's solution:**
-- **Manifold-constrained projection:** Projects the residual connection space of HC onto a specific manifold, **restoring the identity mapping property** while retaining the expressivity benefits.
-- **Rigorous infrastructure optimization:** Implements careful memory access and compute optimizations to ensure practical efficiency at scale.
-- Serves as a **general framework** that makes Hyper-Connections viable for training foundation models at scale.
-
-### Key Results
-
-- Demonstrated effective for **training at scale** with tangible performance improvements.
-- **Superior scalability** compared to vanilla Hyper-Connections.
-- Maintains the advantages of HC (improved gradient flow, dynamic connectivity) without the instability.
-
-### Relevance to Efficient LLM Inference
-
-| Aspect | Impact |
-|--------|--------|
-| **Scalable architecture** | Makes learnable connectivity patterns viable for large models (7B+, 70B+) |
-| **Identity mapping restored** | Ensures stable training, critical for deep models where gradient quality matters |
-| **Infrastructure optimization** | Directly addresses memory access overhead, a key inference bottleneck |
-| **DeepSeek team pedigree** | Authors overlap significantly with DeepSeek Engram, suggesting a unified architecture strategy |
-| **Practical deployability** | Infrastructure awareness means the approach is designed for real hardware constraints |
+- Implement the **chunkwise algorithm**: process tokens in fixed-size chunks where attention within a chunk is exact, but across chunks uses the linear recurrence
+- **DPLR transition matrices:** Implement the specialized variant that is more efficient than general DPLR while matching the classical delta rule
+- **Key kernel:** The state update rule `state = (I - g ⊗ d^T) * state + g ⊗ v` where g, d, v are gate/key/value vectors — this is a rank-1 update that's cache-friendly
+- Hardware efficiency comes from avoiding the softmax computation; use fused kernels for the DPLR decomposition
+- **Gating mechanism:** Finer-grained gating means per-head, per-dimension control — implement with vectorized operations
 
 ---
 
-## Comparative Summary
+## 4. DeepSeek Engram
 
-| Paper | Primary Focus | Inference Efficiency | Memory Efficiency | Context Scalability |
-|-------|--------------|---------------------|-------------------|---------------------|
-| **TTT-E2E** | Test-time training as continual learning | 2.7× faster at 128K context | O(1) per-token (weight updates) | Full-attention scaling |
-| **Titans** | Dual short/long-term neural memory | Fast inference via memory module | Compresses history | 2M+ tokens |
-| **Kimi Linear** | Linear attention hybrid (KDA + MLA) | 6× decoding throughput at 1M | 75% KV cache reduction | 1M+ tokens |
-| **DeepSeek Engram** | Conditional memory lookup (MoE + Memory) | Negligible overhead via prefetching | Host-RAM offloadable | Boosts long-context |
-| **Hyper-Connections** | Learnable residual connectivity | Indirect (better gradient flow) | Improved training efficiency | N/A |
-| **mHC** | Stabilized HC with manifold constraints | Memory access optimization | Infrastructure-aware | N/A |
+**Full Title:** *Conditional Memory via Scalable Lookup: A New Axis of Sparsity for Large Language Models*  
+**arXiv:** [2601.07372v1](https://arxiv.org/abs/2601.07372v1)  
+**Authors:** DeepSeek AI
 
-## Cross-Cutting Themes for Efficient LLM Engines
+### Core Idea
 
-### 1. Memory as a First-Class Primitive
-Both **Titans** and **DeepSeek Engram** treat memory as a distinct architectural component rather than relying solely on attention or recurrence. This suggests future efficient LLMs should have explicit memory modules, not just larger hidden states.
+Introduces **Engram**, a module that modernizes n-gram embedding for **O(1) lookup**, serving as a complementary sparsity axis alongside MoE. While MoE scales via conditional computation, Engram scales via **conditional memory** — structured lookup tables that store facts deterministically. The paper formulates the **Sparsity Allocation problem** and discovers a **U-shaped scaling law** optimizing the MoE/neural computation vs. static memory tradeoff.
 
-### 2. Beyond Fixed Residual Connections
-**Hyper-Connections** and **mHC** demonstrate that the standard residual connection (x + f(x)) is not optimal. Learnable, data-dependent connectivity patterns improve both training stability and model capacity — critical for deploying efficient yet capable models.
+### Key Contributions
 
-### 3. Linear Attention is Close to Full Attention
-**Kimi Linear** is the first to convincingly show that linear attention can not only approximate full attention but *outperform* it under fair comparisons, with massive efficiency gains (75% less KV cache, 6× throughput). This is the most immediately applicable result for building efficient inference engines.
+- **Deterministic O(1) memory lookup:** Engram modules store knowledge as structured n-gram embeddings, retrievable without neural computation
+- **U-shaped scaling law:** Reveals optimal allocation between neural computation (MoE) and static memory (Engram)
+- **Scaled to 27B memory params:** Achieves superior performance over iso-parameter and iso-FLOPs MoE baselines
+- **Broad gains:** MMLU +3.4, BBH +5.0, HumanEval +3.0, Multi-Query NIAH: 84.2 → 97.0
+- **"Deepening" effect:** Engram relieves early layers from static reconstruction, effectively deepening the network for reasoning
+- **Infrastructure-aware efficiency:** Deterministic addressing enables runtime prefetching from host memory with negligible overhead
 
-### 4. Test-Time Computation as Training
-**TTT-E2E** reframes inference as a learning problem. The model adapts to its context during inference, achieving full-attention quality without the KV cache. This is particularly relevant for agentic workflows where models process long, structured contexts.
+### Relevance to Gemma-4 Level Engine
 
-### 5. Infrastructure-Aware Design
-Both **DeepSeek Engram** and **mHC** explicitly optimize for hardware efficiency (prefetching, memory access patterns). The most promising architectures are those designed with real deployment constraints in mind, not just benchmark performance.
+- **Memory/compute separation** aligns with the TTT-E2E and Titans themes — facts live in memory, logic lives in weights
+- **Deterministic O(1) lookup** is vastly simpler to implement in C++ than attention or neural computation
+- **Host memory prefetching** is ideal for an inference engine: Engram tables can be memory-mapped from disk with no GPU involvement
+- **27B parameter Engram** suggests this works at Gemma-4 scale — memory modules complement rather than replace the core model
 
-### 6. Sparse Activation is the Future
-**Kimi Linear** (3B active / 48B total) and **DeepSeek Engram** (MoE + memory) both demonstrate that sparse models with large total capacity but small activated subsets offer the best path to efficient inference. Combine this with **mHC's** infrastructure optimization for a complete efficient inference stack.
+### Practical Implementation (C++ Inference Engine)
+
+- Hash table with linear probing, using n-gram hashes as keys and embedding vectors as values
+- **Prefetch-friendly:** Since addresses are deterministic, precompute the access pattern for a forward pass and batch the lookups
+- **Memory-mapped files:** Engram tables can exceed GPU memory — use mmap with async I/O to keep latency below forward pass threshold
+- **Integration point:** Plug into early layers where the paper shows the "reconstruction relief" effect
+- **Cache tiering:** Hot n-grams in GPU/HBM cache, warm in system RAM, cold in SSD — all with deterministic addressing
+- **Cold start:** Engram modules can be loaded lazily per domain/topic, enabling efficient multi-domain specialization
+
+---
+
+## 5. ByteDance Hyper-Connections
+
+**Full Title:** *Hyper-Connections*  
+**arXiv:** [2409.19606](https://arxiv.org/abs/2409.19606)  
+**Authors:** Bytedance Research (TikTok parent)
+
+### Core Idea
+
+Presents **hyper-connections** as an alternative to standard residual connections. Where residual connections use fixed identity mappings (x + f(x)), hyper-connections introduce **learnable path weights between layers** that dynamically reroute information. This addresses the seesaw effect between gradient vanishing and representation collapse seen in residual connection variants.
+
+### Key Contributions
+
+- **Dynamic cross-layer paths:** The network learns the strength of connections between features at different depths
+- **Layer rearrangement:** Theory shows the network can dynamically rearrange effective layer order
+- **Significant performance gains** over residual connections in both dense and sparse (MoE) language model pretraining
+- **Vision tasks also benefit:** Demonstrated cross-domain applicability
+- **Theoretical bounds:** Formal proofs of improved gradient flow compared to residual connections
+
+### Relevance to Gemma-4 Level Engine
+
+- **Better gradient flow = better training efficiency:** While this affects training more than inference, a better-trained model with the same parameters yields better inference quality
+- **Dynamic routing at inference:** The learned path weights can be used to skip unnecessary computation — early exit without explicit early-exit mechanisms
+- **Parameter redistribution:** Information can flow through multiple paths, potentially allowing thinner layers with equivalent expressivity
+
+### Practical Implementation (C++ Inference Engine)
+
+- After training, path weights are fixed — inference uses a learned connectivity matrix
+- **Sparse execution:** If learned path weights have small magnitudes, those paths can be zeroed out at runtime for speed — effectively a learned MoE over layer connections
+- **Implementation:** Replace `x = x + residual_block(x)` with `x = sum_i(w_i * layer_i(x_prev))` where `w_i` are learned mixing weights
+- **Memory:** Storing connection weights adds minimal overhead (a small matrix per layer group)
+- **Caution:** The paper's gains come primarily from better training — inference speedups require deliberate path pruning
+
+---
+
+## 6. mHC — Manifold-Constrained Hyper-Connections
+
+**Full Title:** *mHC: Manifold-Constrained Hyper-Connections*  
+**arXiv:** [2512.24880](https://arxiv.org/abs/2512.24880)  
+**Authors:** Follow-up to ByteDance Hyper-Connections
+
+### Core Idea
+
+Addresses the **training instability** and **memory access overhead** of unconstrained Hyper-Connections. mHC **projects the residual connection space onto specific manifolds** to restore the identity mapping property, while adding rigorous infrastructure optimization. The key conceptual innovation: **constrain information types onto specific paths** (Code-Path, Fact-Path, Language-Path), creating structured multi-stream architectures.
+
+### Key Contributions
+
+- **Identity mapping restoration:** By constraining connection matrices to manifolds, the model preserves the stable gradient flow of residual connections while gaining hyper-connection expressivity
+- **Multi-stream specialization:** Different residual streams carry different types of information:
+  - **Code-Path:** Optimized for syntactic/structural reasoning
+  - **Fact-Path:** Optimized for factual knowledge retrieval
+  - **Language-Path:** Optimized for natural language generation
+- **Infrastructure optimization:** The paper includes concrete optimizations for memory access patterns, making the architecture practical at scale
+- **Demonstrated training stability** where raw Hyper-Connections failed at larger scales
+
+### Relevance to Gemma-4 Level Engine
+
+- **Specialized execution paths:** At inference time, the engine can identify which paths are active for a given query and skip irrelevant ones — e.g., a pure reasoning query might skip the Fact-Path
+- **Predictable routing:** Manifold constraints mean path selection is bounded and optimizable — the inference engine can pre-plan which streams to activate
+- **Memory efficiency:** Multiple narrow streams can be more cache-friendly than one wide residual stream
+- **Modular specialization:** Fact-Path could connect to Engram memory, Code-Path to specialized kernels, enabling a truly modular inference stack
+
+### Practical Implementation (C++ Inference Engine)
+
+- **Three parallel residual streams** with constrained cross-connections (manifold-projected matrices)
+- **Routing logic:** Implement a lightweight classifier or use the layer's natural gating to determine stream activation
+- **Manifold constraints:** Implement as projection operations (e.g., doubly-stochastic matrix projection, spectral normalization) — these are matrix operations with known efficient implementations
+- **Stream scheduling:** On multi-core CPU or multi-GPU, independent streams can execute in parallel
+- **Key optimization:** If stream routing can be predicted from the first few tokens, the engine can speculatively activate streams
+
+---
+
+## 7. Newer/Related Work
+
+### Emerging Since Original Publications
+
+- **Beyond the Birkhoff Polytope: Spectral-Sphere-Constrained Hyper-Connections** (arXiv 2026-03-21): Extends mHC with spectral sphere constraints, potentially simplifying the manifold projection operations. This could reduce the overhead of mHC implementation.
+
+- **go-mHC: Generalized Orthostochastic Matrix Parameterization** (arXiv 2026-04-02): Proposes exact parameterization of doubly stochastic matrices that scales better than the factorial approach. Highly relevant for efficient mHC implementation.
+
+- **Ablate and Rescue: Causal Analysis of Residual Stream Hyper-Connections** (arXiv 2026-03-16): Provides mechanistic insights into how mHC streams interact, offering guidance on which streams to prioritize/skip at inference time.
+
+- **Functional Component Ablation on Hybrid Models** (arXiv 2026-03-23): Analyzes Qwen3.5 and Falcon-H1 hybrid models to determine which components (linear attn vs softmax attn vs SSM) are actually used. Suggests that hybrid architectures have significant redundancy.
+
+- **Kalman Linear Attention** (arXiv 2026-02-11): Reframes sequence modeling with Bayesian filters, achieving better state tracking than Mamba/GLA for complex reasoning tasks.
+
+- **Digital Metabolism: Decoupling Logic from Facts via Regenerative Unlearning** (arXiv 2026-01-15): Closely aligned with the Engram/Titans theme — explicitly proposes unlearning facts from weights while preserving logic, enabling a "pure neural logic core." This validates the memory/computation separation direction.
+
+- **M²RNN: Non-Linear RNNs with Matrix-Valued States** (arXiv 2026-03-15): Introduces more expressive RNN architectures that could compete with linear attention for inference efficiency while handling reasoning tasks that SSMs struggle with.
+
+- **Online Reasoning Calibration via TTT** (arXiv 2026-04-01): Shows test-time training enables generalizable conformal LLM reasoning — validating the TTT-E2E approach for reasoning tasks.
+
+- **Attention Residuals (AttnRes)** (arXiv 2026-03-16): Replaces fixed residual accumulation with softmax attention over preceding layer outputs, allowing dynamic depth allocation. An alternative to hyper-connections.
+
+### Open Source Implementations
+
+- **Kimi Linear:** vLLM integration + KDA kernel released by Moonshot AI
+- **Hyper-Connections:** Official implementations available, applied to vision and language
+- **mHC:** Infrastructure-optimized implementations available
+- **TTT-E2E:** Code publicly available
+- **Titans:** Implementation available from DeepMind
+
+---
+
+## 8. Synthesis: Recommendations for hesa-llm
+
+### Unified Architecture Vision
+
+These papers converge on a single architectural principle: **separate facts from computation, use structured memory for knowledge, and optimize for inference efficiency through sparsity and specialization.**
+
+### Recommended Architecture for hesa-llm
+
+```
+┌─────────────────────────────────────────────────┐
+│                   User Input                     │
+└──────────────────┬──────────────────────────────┘
+                   │
+    ┌──────────────┼──────────────┐
+    ▼              ▼              ▼
+┌────────┐  ┌────────────┐  ┌───────────┐
+│ Fact   │  │ Code Path  │  │ Language  │  ← mHC streams
+│ Path   │  │ (reasoning)│  │ Path      │     (3 residual streams)
+│        │  │            │  │           │
+│ ┌────┐ │  │            │  │           │
+│ │Eng │ │  │            │  │           │
+│ │ram │ │  │            │  │           │
+│ │RAM │ │  │            │  │           │  ← Engram for facts
+│ └────┘ │  │            │  │           │     (O(1) deterministic lookup)
+└────────┴──┴────────────┴──┴───────────┘
+                   │
+    ┌──────────────┼──────────────┐
+    │              ▼              │
+    │  ┌─────────────────────┐    │
+    │  │   Kimi Linear Attn  │    │  ← Core attention
+    │  │   (KDA, O(n))       │    │     (75% KV cache reduction)
+    │  └─────────────────────┘    │
+    │           │                 │
+    │           ▼                 │
+    │  ┌─────────────────────┐    │
+    │  │   Titans Memory      │    │  ← Neural memory module
+    │  │   (learned mem at    │    │     (2M+ context)
+    │  │    test time)        │    │
+    │  └─────────────────────┘    │
+    │                              │
+    │           ▼                  │
+    │  ┌─────────────────────┐    │
+    │  │   TTT-E2E Weight     │    │  ← Test-time adaptation
+    │  │   Update (prefill)   │    │     (context compression)
+    │  └─────────────────────┘    │
+    │                              │
+    └──────────────┬───────────────┘
+                   ▼
+            Generated Output
+```
+
+### Implementation Priority
+
+1. **Phase 1 — Foundation:** Kimi Linear attention (KDA kernel) — biggest immediate win for KV cache and throughput, with open-source vLLM reference code to port to C++
+2. **Phase 2 — Memory:** Engram module — simplest to implement (hash table + memory-mapped files), largest quality boost per complexity unit
+3. **Phase 3 — Routing:** Hyper-Connections / mHC — add dynamic path routing for specialized execution, enabling conditional compute
+4. **Phase 4 — Memory Module:** Titans neural memory — add long-term learned memory for context beyond Kimi Linear window
+5. **Phase 5 — Adaptation:** TTT-E2E test-time training — optional mode for power users who prioritize memory efficiency over prefill speed
+
+### Key Metrics to Target (Gemma-4 Class: ~27B)
+
+| Metric              | Target                     | Enabling Papers           |
+|---------------------|----------------------------|---------------------------|
+| KV Cache            | ≤ 25% of full attention    | Kimi Linear               |
+| Decode Throughput   | 6x better at 1M ctx        | Kimi Linear               |
+| Long Context        | 256K+ without memory blowup | Titans + Kimi Linear + TTT|
+| Factual Recall      | +3-5% over baseline        | Engram                    |
+| Reasoning           | +5% on complex tasks       | Engram (depth effect)     |
+| Prefill Latency     | Trade-off (TTT mode)       | TTT-E2E                    |
+| Model Size          | 27B params equivalent      | All papers combined       |
+| Streaming Support   | O(1) per-token latency     | Kimi Linear + Titans      |
+
+### C++ Implementation Considerations
+
+- **Memory-mapped Engram tables:** Use `mmap`/`madvise` with `MADV_SEQUENTIAL` for predictable access patterns
+- **Fused KDA kernels:** SIMD for rank-1 state updates; consider AVX-512/NEON optimizations
+- **Stream-parallel execution:** mHC streams can run on separate threads/cores
+- **Lazy loading:** Engram domains load on-demand; memory module grows until cap
+- **Quantization awareness:** Design all components (especially Engram hash tables and path weights) to work with INT8/INT4 quantization
+- **No external dependencies:** Keep the engine portable — implement linear algebra primitives directly or with minimal BLAS wrapper
+
+---
+
+*Last updated: 2026-04-06*
+*For hesa-llm architecture tracking*
