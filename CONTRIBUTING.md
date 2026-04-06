@@ -1,26 +1,36 @@
 # Contributing to hesa-llm
 
-Thank you for your interest in contributing!
+Thank you for your interest in contributing to hesa-llm!
 
 ## Getting Started
 
-1. Fork the repository and clone your fork.
-2. Create a feature branch (`git checkout -b feature/my-feature`).
-3. Write clean, well-documented code following the existing code style.
-4. Ensure the project builds and tests pass.
-5. Commit your changes with a clear, descriptive message.
-6. Push your branch and open a Pull Request.
+1. Fork the repository and create your feature branch
+2. Build and run the existing tests to make sure everything works
+3. Make your changes following the guidelines below
+4. Submit a pull request
 
 ## Code Style
 
-- Follow modern C++ (C++17) best practices.
-- Use `clang-format` for consistent formatting.
-- Write meaningful commit messages using conventional commits.
+- **Language**: C++17
+- **Formatting**: Follow existing code style; prefer clang-format if unsure
+- **Naming**: snake_case for variables/functions, CamelCase for types/classes, UPPER_CASE for macros
+- **Headers**: Use `#pragma once` or include guards consistently
+
+## Commit Messages
+
+- Use imperative mood: "Add feature" not "Added feature"
+- Keep the first line under 72 characters
+- Reference issue numbers when applicable
+
+## Pull Requests
+
+- One logical change per PR
+- Include tests for new functionality
+- Update documentation as needed
+- Ensure CI passes before requesting review
 
 ## Reporting Issues
 
-Please use the GitHub issue tracker to report bugs or request features.
-
-## Code of Conduct
-
-Be respectful and inclusive in all interactions.
+- Search existing issues first
+- Include steps to reproduce, expected behavior, and actual behavior
+- Provide system info: OS, compiler, CMake version

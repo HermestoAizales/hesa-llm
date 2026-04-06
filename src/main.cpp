@@ -1,11 +1,10 @@
+#include <hesa/hesa.h>
 #include <iostream>
-#include "hesa/version.hpp"
 
 int main() {
     std::cout << "hesa-llm v"
-              << hesa::VERSION_MAJOR << "."
-              << hesa::VERSION_MINOR << "."
-              << hesa::VERSION_PATCH
-              << std::endl;
+              << HESA_VERSION_MAJOR << "."
+              << HESA_VERSION_MINOR << "."
+              << HESA_VERSION_PATCH << std::endl;
     return 0;
 }
