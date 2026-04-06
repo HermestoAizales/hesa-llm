@@ -882,7 +882,6 @@ y = x + α·Σ_j γ_j · P_j·x    where P_j projects onto manifold basis vector
 |--------|----------|----------|-----------|-----------|------|
 | **M2 Mac** | Apple M2 24GB | 16GB available | Q4_K_M | 13B | > 100 tok/s gen |
 | **RTX 3080** | NVIDIA RTX 3080 10GB | 8GB available | Q4_K_M | 7B | > 80 tok/s gen |
-| **Tesla P40** | NVIDIA P40 24GB | 22GB available | Q5_K_M | 14B | > 60 tok/s gen |
 
 ### 6.2 Memory Budget
 
@@ -903,10 +902,9 @@ For a **7B model with full HESA features** (neural memory + TTT + Engram + mHC +
 
 ### 6.3 Backend-Specific Optimizations
 
-#### 6.3.1 CUDA (RTX 3080, Tesla P40)
+#### 6.3.1 CUDA (RTX 3080)
 
-- sm_75 (Turing) and sm_80 (Ampere) as minimum targets
-- Use CUTLASS-style GEMM kernels for matmul
+- sm_86 (Ampere) als Minimum. RTX 3080: 10GB VRAM, 760 GB/s Bandbreite
 - Flash Attention 2 for softmax attention
 - Linear attention implemented as batched matmul: no custom kernel needed
 - CUDA Graphs for capturing execution graph (eliminate kernel launch overhead)
