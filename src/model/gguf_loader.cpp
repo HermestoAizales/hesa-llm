@@ -86,13 +86,13 @@ Result<void> GGUFReader::parse() {
 
 Result<void> GGUFReader::read_header() {
     fd_ = open(path_.c_str(), O_RDONLY);
-    if (fd_ < 0) return error(Error::FILE_NOT_FOUND);
+    if (fd_ < 0) return make_error<void>(Error::FILE_NOT_FOUND);
 
     struct stat st;
     if (fstat(fd_, &st) < 0) {
         ::close(fd_);
         fd_ = -1;
-        return error(Error::FILE_NOT_FOUND);
+        return make_error<void>(Error::FILE_NOT_FOUND);
     }
     file_size_ = static_cast<uint64_t>(st.st_size);
 
@@ -101,21 +101,21 @@ Result<void> GGUFReader::read_header() {
         ::close(fd_);
         fd_ = -1;
         data_ = nullptr;
-        return error(Error::FILE_NOT_FOUND);
+        return make_error<void>(Error::FILE_NOT_FOUND);
     }
 
     uint32_t magic = read_val<uint32_t>(data_);
     if (magic != GGUF_MAGIC) {
         munmap(const_cast<uint8_t*>(data_), file_size_);
         data_ = nullptr;
-        return error(Error::INVALID_FORMAT);
+        return make_error<void>(Error::INVALID_FORMAT);
     }
 
     uint32_t version = read_val<uint32_t>(data_ + 4);
     if (version != GGUF_VERSION) {
         munmap(const_cast<uint8_t*>(data_), file_size_);
         data_ = nullptr;
-        return error(Error::INVALID_FORMAT);
+        return make_error<void>(Error::INVALID_FORMAT);
     }
 
     uint64_t off = 8;
@@ -367,7 +367,7 @@ Model::~Model() = default;
 
 Result<const Tensor*> Model::get_tensor(const std::string& name) const {
     auto it = tensors_.find(name);
-    if (it == tensors_.end()) return error(Error::TENSOR_NOT_FOUND);
+    if (it == tensors_.end()) return make_error<Tensor*>(Error::TENSOR_NOT_FOUND);
     return &it->second;
 }
 

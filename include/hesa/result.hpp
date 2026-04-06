@@ -8,9 +8,6 @@
 
 namespace hesa {
 
-/**
- * Error categories for HESA operations.
- */
 enum class Error : int {
     SUCCESS = 0,
     OUT_OF_MEMORY,
@@ -67,6 +64,12 @@ template<typename T>
 using Result = std::expected<T, std::error_code>;
 
 inline Result<void> ok() { return {}; }
+
+// Generic error factory — works for Result<T> for any T
+template<typename T>
+inline Result<T> make_error(Error e) {
+    return std::unexpected{make_error_code(e)};
+}
 
 inline Result<void> error(Error e) {
     return std::unexpected{make_error_code(e)};

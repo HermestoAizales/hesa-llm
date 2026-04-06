@@ -35,18 +35,18 @@ Result<std::unique_ptr<Engine>> Engine::create(const std::string& model_path,
     auto model = Model::load(model_path, backend->get());
     if (!model) return std::unexpected{model.error()};
 
-    auto tokenizer = create_tokenizer_from_model(*model->get());
+    auto tokenizer = create_tokenizer_from_model(**model);
     if (!tokenizer) return std::unexpected{tokenizer.error()};
 
-    const auto& meta = model->get()->metadata();
+    const auto& meta = (*model)->metadata();
     fprintf(stderr, "[Engine] Model loaded: arch=%s, vocab=%u, layers=%u, hidden=%u\n",
             meta.architecture.empty() ? "?" : meta.architecture.c_str(),
             meta.vocab_size, meta.block_count, meta.embedding_length);
 
     auto engine = std::make_unique<Engine>();
-    engine->backend_   = std::move(backend->get());
-    engine->model_     = std::move(model->get());
-    engine->tokenizer_ = std::move(tokenizer->get());
+    engine->backend_   = std::move(*backend);
+    engine->model_     = std::move(*model);
+    engine->tokenizer_ = std::move(*tokenizer);
     engine->stop_requested_.store(false);
 
     size_t hidden_dim = engine->model_->metadata().embedding_length;

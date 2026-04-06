@@ -135,7 +135,7 @@ CPU_Backend::~CPU_Backend() = default;
 Result<Tensor> CPU_Backend::alloc_tensor(Dtype dtype, std::span<const int64_t> shape) {
     Tensor t(dtype, shape, this);
     if (t.nelements() == 0)
-        return error(Error::INVALID_ARGUMENT);
+        return make_error<Tensor>(Error::INVALID_ARGUMENT);
     return std::move(t);
 }
 
@@ -299,7 +299,7 @@ Result<Tensor> CPU_Backend::quantize(TensorView src, Dtype target_dtype) {
     // Full implementation in Phase 2
     (void)src;
     (void)target_dtype;
-    return error(Error::BACKEND_NOT_AVAILABLE);
+    return make_error<Tensor>(Error::BACKEND_NOT_AVAILABLE);
 }
 
 Result<void> CPU_Backend::copy_tensor(const Tensor& src, Tensor& dst) {

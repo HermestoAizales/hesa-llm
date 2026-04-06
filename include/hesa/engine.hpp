@@ -7,6 +7,7 @@
 #include "hesa/sampling.hpp"
 #include "hesa/tokenizer.hpp"
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <span>
@@ -53,7 +54,7 @@ public:
     /** Access the model (for advanced usage). */
     const Model& model() const { return *model_; }
 
-private:
+    // Public constructor for make_unique access (only create() should call this).
     Engine() = default;
 
     // --- Phase-1 forward pass (embedding → simple layer → LM head) ---

@@ -56,7 +56,7 @@ TEST(test_tensor_view) {
     for (int i = 0; i < 6; ++i) data[i] = static_cast<float>(i);
 
     // Reshape
-    auto v = t.reshape({3, 2});
+    auto v = t.reshape(std::vector<int64_t>{3, 2});
     ASSERT(v.nelements() == 6);
     ASSERT(v.shape()[0] == 3);
     ASSERT(v.shape()[1] == 2);

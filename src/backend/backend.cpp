@@ -43,7 +43,7 @@ Result<std::unique_ptr<Backend>> create_backend(BackendType type, DeviceConfig c
         }
 #endif
         default:
-            return error(Error::BACKEND_NOT_AVAILABLE);
+            return make_error<std::unique_ptr<Backend>>(Error::BACKEND_NOT_AVAILABLE);
     }
 }
 
