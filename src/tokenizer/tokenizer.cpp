@@ -1,6 +1,6 @@
 #include "hesa/tokenizer.hpp"
 #include "hesa/model.hpp"
-#include "hesa/Result.hpp"
+#include "hesa/result.hpp"
 
 #include <algorithm>
 #include <cctype>

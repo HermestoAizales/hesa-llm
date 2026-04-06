@@ -89,7 +89,7 @@ public:
     const void* data() const { return data_; }
     Dtype dtype() const { return dtype_; }
     const Shape& shape() const { return shape_; }
-    std::span<const size_t> byte_strides() const { return {strides_.data(), ndim()}; }
+    std::span<const size_t> byte_strides() const { return {strides_, shape_.ndim}; }
     size_t ndim() const { return shape_.ndim; }
     size_t nelements() const { return shape_.nelements(); }
     size_t nbytes() const;
@@ -153,7 +153,7 @@ private:
 
 // Convenience constructors
 inline Tensor make_tensor_f32(std::initializer_list<int64_t> shape, Backend* b = nullptr) {
-    return Tensor(Dtype::F32, shape, b);
+    return Tensor(Dtype::F32, Shape{shape}, b);
 }
 
 } // namespace hesa

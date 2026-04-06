@@ -6,7 +6,7 @@ project(hesa-llm
 )
 
 # -- C++20 (coroutines, concepts, std::span, std::expected) --
-set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
@@ -17,7 +17,7 @@ include(CheckCXXCompilerFlag)
 if(MSVC)
     add_compile_options(/W4 /utf-8)
 else()
-    add_compile_options(-Wall -Wextra -Wpedantic)
+    add_compile_options(-Wall -Wextra -Wpedantic -Wno-missing-field-initializers)
     check_cxx_compiler_flag("-mavx2" COMPILER_SUPPORTS_AVX2)
     check_cxx_compiler_flag("-mavx512f" COMPILER_SUPPORTS_AVX512F)
 endif()
@@ -47,7 +47,6 @@ option(HESA_ENABLE_CUDA  "Enable CUDA backend"     OFF)
 option(HESA_ENABLE_METAL "Enable Metal backend"    OFF)
 option(HESA_ENABLE_TESTS "Build unit tests"        ON)
 
-# Auto-enable Metal on macOS
 if(APPLE)
     list(APPEND CMAKE_PREFIX_PATH /Applications)
     check_cxx_compiler_flag("-fobjc-arc" HAS_OBJC_ARC)
@@ -58,7 +57,6 @@ if(APPLE)
     endif()
 endif()
 
-# Auto-detect CUDA
 if(NOT DEFINED HESA_ENABLE_CUDA OR NOT HESA_ENABLE_CUDA)
     include(CheckLanguage)
     check_language(CUDA)
@@ -68,27 +66,45 @@ if(NOT DEFINED HESA_ENABLE_CUDA OR NOT HESA_ENABLE_CUDA)
     endif()
 endif()
 
-# -- FetchContent (lazy deps) --
+# -- FetchContent: nlohmann/json (header-only) --
 include(FetchContent)
-
-# nlohmann/json for GGUF metadata & config
 FetchContent_Declare(
     nlohmann_json
     URL      https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz
-    URL_HASH SHA256=40f2e335995684229052c0c8e4b03bf1769fa52c7095976c7c4e55b3f3870e2b
+    URL_HASH SHA256=d6c65aca6b1ed68e7a182f4757257b107ae403032760ed6ef121c9d55e81757d
 )
 FetchContent_MakeAvailable(nlohmann_json)
 
-# -- Source files --
+# -- Core library sources --
 set(HESA_CORE_SRCS
     src/hesa_core.cpp
+
+    # Tensor
     src/tensor/tensor.cpp
     src/tensor/tensor_ops.cpp
+
+    # Backend
     src/backend/backend.cpp
     src/backend/cpu_backend.cpp
+
+    # Model / GGUF parser
+    src/gguf_parser.cpp
     src/model/gguf_loader.cpp
+
+    # Tokenizer
     src/tokenizer/tokenizer.cpp
+
+    # Sampling
     src/sampling/sampler.cpp
+
+    # KV Cache (Phase 1: ring buffer)
+    src/memory/kv_cache.cpp
+
+    # RoPE (Phase 1: rotary positional encoding)
+    src/layers/rope.cpp
+
+    # Engine (Phase 1: basic generation loop)
+    src/engine.cpp
 )
 
 if(HESA_ENABLE_CUDA)
@@ -151,7 +167,9 @@ target_link_libraries(hesa-llm PRIVATE hesa_core)
 # -- Testing --
 if(HESA_ENABLE_TESTS)
     enable_testing()
-    add_subdirectory(tests)
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests")
+        add_subdirectory(tests)
+    endif()
 endif()
 
 # -- Install rules --

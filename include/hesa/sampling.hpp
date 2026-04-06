@@ -19,6 +19,45 @@ struct GenerationConfig {
 };
 
 /**
+ * Standalone per-token sampling functions (no heap allocation in hot path).
+ * All operate on float logits arrays (CPU, F32).
+ */
+
+/**
+ * Greedy sampling — returns argmax(logits).
+ */
+int32_t sample_greedy(std::span<const float> logits);
+
+/**
+ * Temperature sampling — apply softmax with temperature, then sample.
+ */
+int32_t sample_temperature(std::span<const float> logits, float temp);
+
+/**
+ * Top-K sampling — keep top-k logits, apply temperature softmax, sample.
+ */
+int32_t sample_top_k(std::span<const float> logits, int32_t k, float temp);
+
+/**
+ * Top-P (nucleus) sampling — cumulative probability filtering.
+ */
+int32_t sample_top_p(std::span<const float> logits, float top_p, float temp);
+
+/**
+ * Repetition-penalty sampling — reduce logit of previously generated tokens.
+ * penalty > 1.0f: penalise repetition.
+ * penalty == 1.0f: identity.
+ *
+ * @param logits       Logits array [vocab_size], modified in-place
+ * @param last_tokens  Previously generated token IDs
+ * @param penalty      Repetition penalty factor
+ * @return Sampled token ID
+ */
+int32_t sample_repetition_penalty(std::span<float> logits,
+                                   std::span<const int32_t> last_tokens,
+                                   float penalty);
+
+/**
  * Select a single token from logits using temperature + top-k + top-p + rep-penalty.
  * Modifies logits in-place (applies softmax).
  */

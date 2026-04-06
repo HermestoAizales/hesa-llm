@@ -1,4 +1,5 @@
 #include "hesa/backend.hpp"
+#include "backend/cpu_backend.hpp"
 
 #include <thread>
 

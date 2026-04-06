@@ -2,6 +2,7 @@
 #define HESA_TOKENIZER_HPP
 
 #include "hesa/result.hpp"
+namespace hesa { class Model; }
 
 #include <cstdint>
 #include <memory>
