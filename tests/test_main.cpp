@@ -164,23 +164,27 @@ TEST(test_cpu_rope) {
 }
 
 // -- Test: RoPE at position 1 --
+// RoPE pairs are (d, d+half). For head_dim=4: pairs are (0,2) and (1,3).
+// data = {x0_0, x0_1, x1_0, x1_1} where pair d uses indices (d, d+half).
 TEST(test_cpu_rope_pos1) {
     float data[4] = {1.0f, 0.0f, 0.0f, 1.0f};
     int32_t positions[] = {1};
 
     hesa::cpu_rope_f32(data, positions, 1, 1, 4, 10000.0f);
 
-    // freq for dim 0: 10000^(-0/4) = 1, angle = 1*1 = 1 rad
-    // freq for dim 1: 10000^(-1/4) = 0.1, angle = 1*0.1 = 0.1 rad
+    // pair d=0: indices (0, 2), freq = 10000^(-0/2) = 1, theta = 1*1 = 1 rad
     float cos0 = std::cos(1.0f);
     float sin0 = std::sin(1.0f);
-    float cos1 = std::cos(0.1f);
-    float sin1 = std::sin(0.1f);
+    // pair d=1: indices (1, 3), freq = 10000^(-2/4) = 0.01, theta = 1*0.01
+    float cos1 = std::cos(0.01f);
+    float sin1 = std::sin(0.01f);
 
-    ASSERT_NEAR(data[0], 1.0f * cos0 - 0.0f * sin0, 1e-4f);
-    ASSERT_NEAR(data[1], 1.0f * sin0 + 0.0f * cos0, 1e-4f);
-    ASSERT_NEAR(data[2], 0.0f * cos1 - 1.0f * sin1, 1e-4f);
-    ASSERT_NEAR(data[3], 0.0f * sin1 + 1.0f * cos1, 1e-4f);
+    // x0=1, x1=0 rotated by theta0 → (cos0, sin0)
+    ASSERT_NEAR(data[0], 1.0f * cos0 - 0.0f * sin0, 1e-4f);  // cos(1) ≈ 0.540
+    ASSERT_NEAR(data[2], 1.0f * sin0 + 0.0f * cos0, 1e-4f);  // sin(1) ≈ 0.841
+    // x0=0, x1=1 rotated by theta1 → (-sin1, cos1)
+    ASSERT_NEAR(data[1], 0.0f * cos1 - 1.0f * sin1, 1e-4f);  // -sin(0.01) ≈ -0.01
+    ASSERT_NEAR(data[3], 0.0f * sin1 + 1.0f * cos1, 1e-4f);  // cos(0.01) ≈ 0.99995
     PASS();
 }
 

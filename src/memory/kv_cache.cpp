@@ -141,20 +141,35 @@ void KVCache::clear() {
 }
 
 void KVCache::evict_sliding_window(size_t window_size) {
-    if (seq_len_ <= window_size || window_size == 0) {
+    size_t actual_len = std::min(seq_len_, cfg_.max_seq_len);
+    if (actual_len <= window_size || window_size == 0) {
         return;
     }
 
-    size_t to_remove = seq_len_ - window_size;
+    size_t to_remove = actual_len - window_size;
     const size_t head_bytes = cfg_.head_dim * sizeof(float);
 
+    // The oldest to_remove tokens start at logical position 0 (for a fully
+    // wrapped buffer, seq_len_ > max, the oldest valid is at physical wrap
+    // point). But since we keep data in ring positions, the oldest logical
+    // tokens map to physical_pos(0), physical_pos(1), etc.
+    // physical_pos(seq_len_ - to_remove) gives us the start of the window
+    // we want to KEEP. So positions 0..to_remove-1 are the ones to evict.
+    // BUT only when NOT wrapped. When wrapped, the oldest data is at
+    // physical_pos(seq_len_ - actual_len) = physical_pos(6-6) = physical_pos(0).
     for (size_t l = 0; l < cfg_.n_layers; ++l) {
         for (size_t h = 0; h < cfg_.n_kv_heads; ++h) {
             auto& kt = key_cache_[l * cfg_.n_kv_heads + h];
             auto& vt = value_cache_[l * cfg_.n_kv_heads + h];
 
             for (size_t i = 0; i < to_remove; ++i) {
-                size_t phys = physical_pos(i);
+                // Evict logical position i maps to physical_pos(i)
+                // BUT: in a wrapped ring, the oldest stored data starts at
+                // physical_pos(seq_len_ - actual_len).
+                size_t oldest_logical = seq_len_ > cfg_.max_seq_len
+                    ? seq_len_ - cfg_.max_seq_len  // wrapped: start of current data
+                    : 0;                           // not wrapped: starts at 0
+                size_t phys = physical_pos(oldest_logical + i);
                 auto kv = kt.select(0, static_cast<int64_t>(phys));
                 auto vv = vt.select(0, static_cast<int64_t>(phys));
                 std::memset(kv.data(), 0, head_bytes);
@@ -163,11 +178,7 @@ void KVCache::evict_sliding_window(size_t window_size) {
         }
     }
 
-    // Logically: the remaining tokens are positions [to_remove .. seq_len_-1]
-    // For a ring buffer we keep data in place and just update seq_len_.
-    // The caller must handle logical→physical offset shifts if needed.
-    // Simple approach: reset to the window's worth of tokens
-    seq_len_ = window_size;
+    seq_len_ = actual_len - to_remove;  // = window_size
 }
 
 bool KVCache::wraps(size_t pos, size_t length) const {

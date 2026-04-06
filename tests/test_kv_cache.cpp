@@ -153,12 +153,22 @@ TEST(test_kv_ring_wrap_eviction) {
         float k[2] = {static_cast<float>(100 + i), static_cast<float>(200 + i)};
         float v[2] = {0, 0};
         cache.write(0, 0, i, k, v);
+        cache.advance(1);
     }
+    // seq_len_ = 4 (capped). Ring: physical[0]=pos4(104,204), [1]=pos5(105,205),
+    // [2]=pos2(102,202), [3]=pos3(103,203)
+    // oldest data wraps to physical_pos(4%4)=0
 
     cache.evict_sliding_window(2);
+    // Remove oldest 2 items (pos4@phys0, pos5@phys1), keeping pos2@phys2, pos3@phys3
+    // But we want to keep newest, so evict oldest (pos2, pos3 @ phys 2,3)
+    // Wait - with ring buffer: after 6 writes with size=4, newest are at phys 0,1
+    // oldest are at phys 2,3. Evict oldest 2 → clear phys 2,3. seq_len_=2.
     ASSERT(cache.used() == 2);
 
     float* k_ptr = static_cast<float*>(cache.key_tensor(0, 0).data());
+    // After eviction, seq_len=2. physical_pos(0)=0, physical_pos(1)=1.
+    // phys0 has pos4 data (104,204), phys1 has pos5 data (105,205)
     ASSERT_NEAR(k_ptr[0], 104.0f, 1e-6f);
     ASSERT_NEAR(k_ptr[1], 204.0f, 1e-6f);
 

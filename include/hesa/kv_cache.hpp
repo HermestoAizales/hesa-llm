@@ -73,7 +73,7 @@ public:
     void clear();
 
     /** Number of tokens currently stored. */
-    size_t used() const { return seq_len_; }
+    size_t used() const { return std::min(seq_len_, cfg_.max_seq_len); }
 
     /** Maximum capacity (max_seq_len). */
     size_t capacity() const { return cfg_.max_seq_len; }
@@ -84,8 +84,8 @@ public:
      */
     void evict_sliding_window(size_t window_size);
 
-    /** Advance the logical sequence length. */
-    void advance(size_t n = 1) { seq_len_ = std::min(seq_len_ + n, cfg_.max_seq_len); }
+    /** Advance the sequence length after writing tokens. */
+    void advance(size_t n = 1) { seq_len_ += n; }
 
     /** Map a logical position to its physical ring-buffer index. */
     size_t physical_pos(size_t logical_pos) const {

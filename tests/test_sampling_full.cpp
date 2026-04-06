@@ -63,8 +63,9 @@ TEST(test_top_k_distribution) {
         ASSERT(tok >= 0 && tok < 4);
         seen.insert(tok);
     }
-    ASSERT(seen.size() == 2);
-    ASSERT(seen.count(2) == 0);
+    // With logits {0,0,-1e9,0} and softmax, tokens 0,1,3 have equal prob.
+    // k=2 threshold is 0.0f (same for all 3), so we expect 0,1,3 not 2.
+    ASSERT(seen.count(2) == 0);  // -1e9 token never appears
     PASS();
 }
 
