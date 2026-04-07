@@ -60,7 +60,7 @@ public:
     std::unique_ptr<Backend>   backend_;
     std::unique_ptr<Tokenizer> tokenizer_;
 
-    KVCache*                   kv_cache_ = nullptr;
+    std::unique_ptr<KVCache>   kv_cache_;
     std::vector<LayerBuffers>  layer_bufs_;
     int32_t                    position_counter_ = 0;
     std::atomic<bool>          stop_requested_{false};

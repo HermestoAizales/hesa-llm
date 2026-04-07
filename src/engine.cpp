@@ -94,9 +94,7 @@ Result<std::unique_ptr<Engine>> Engine::create(const std::string& model_path,
     engine->backend_    = std::move(*backend);
     engine->model_      = std::move(*model);
     engine->tokenizer_  = std::move(*tokenizer);
-    engine->kv_cache_   = kv_cache.get();
-    // Keep the unique_ptr alive by releasing it
-    (void)kv_cache.release(); // engine owns the pointer via raw pointer
+    engine->kv_cache_   = std::move(kv_cache);
     engine->layer_bufs_  = std::move(layer_bufs);
     engine->position_counter_ = 0;
     engine->stop_requested_.store(false);
@@ -112,13 +110,7 @@ Result<std::unique_ptr<Engine>> Engine::create(const std::string& model_path,
 
 Engine::Engine() = default;
 
-Engine::~Engine() {
-    // Free KV Cache (we own it via raw pointer)
-    if (kv_cache_) {
-        delete kv_cache_;
-        kv_cache_ = nullptr;
-    }
-}
+Engine::~Engine() = default;
 
 Result<void> Engine::stop() {
     stop_requested_.store(true);

@@ -1,0 +1,596 @@
+#include "hesa/simd.hpp"
+
+#if defined(__ARM_NEON) || defined(__aarch64__) || defined(_M_ARM64)
+#include <arm_neon.h>
+#endif
+#if defined(__AVX2__) || defined(__AVX512F__)
+#include <immintrin.h>
+#endif
+
+#include <algorithm>
+#include <cmath>
+#include <cstring>
+#include <vector>
+
+namespace hesa { namespace simd {
+
+// ─── Global SIMD level ────────────────────────────────────────
+
+static Level g_simd_level = Level::Scalar;
+
+Level detect_level() {
+#if HESA_SIMD == SCALAR
+    return Level::Scalar;
+#elif HESA_SIMD == NEON
+    return Level::NEON;
+#elif HESA_SIMD == AVX512
+    return Level::AVX512;
+#elif HESA_SIMD == AVX2_FMA
+    return Level::AVX2_FMA;
+#elif HESA_SIMD == AVX2
+    return Level::AVX2;
+#else
+    return Level::Scalar;
+#endif
+}
+
+Level current_level() { return g_simd_level; }
+void set_level(Level level) { g_simd_level = level; }
+
+#ifndef HESA_SIMD_LEVEL
+#define HESA_SIMD_LEVEL SCALAR
+#endif
+
+// ─── DOT PRODUCT ──────────────────────────────────────────────
+
+float dot_f32(const float* a, const float* b, size_t n) {
+#if HESA_SIMD_LEVEL == NEON
+    float32x4_t acc = vdupq_n_f32(0.0f);
+    size_t i = 0;
+    for (; i + 4 <= n; i += 4) {
+        float32x4_t va = vld1q_f32(a + i);
+        float32x4_t vb = vld1q_f32(b + i);
+        acc = vfmaq_f32(acc, va, vb);
+    }
+    float sum = vaddvq_f32(acc);
+    for (; i < n; ++i) sum += a[i] * b[i];
+    return sum;
+
+#elif HESA_SIMD_LEVEL == AVX512
+    __m512 acc = _mm512_setzero_ps();
+    size_t i = 0;
+    for (; i + 16 <= n; i += 16) {
+        __m512 va = _mm512_loadu_ps(a + i);
+        __m512 vb = _mm512_loadu_ps(b + i);
+        acc = _mm512_fmadd_ps(va, vb, acc);
+    }
+    float sum = _mm512_reduce_add_ps(acc);
+    for (; i < n; ++i) sum += a[i] * b[i];
+    return sum;
+
+#elif HESA_SIMD_LEVEL == AVX2_FMA
+    __m256 acc = _mm256_setzero_ps();
+    size_t i = 0;
+    for (; i + 8 <= n; i += 8) {
+        __m256 va = _mm256_loadu_ps(a + i);
+        __m256 vb = _mm256_loadu_ps(b + i);
+        acc = _mm256_fmadd_ps(va, vb, acc);
+    }
+        __m128 hi_ = _mm256_extractf128_ps(acc, 1);
+    __m128 lo_ = _mm256_castps256_ps128(acc);
+    lo_ = _mm_add_ps(lo_, hi_);
+    lo_ = _mm_add_ps(lo_, _mm_movehl_ps(lo_, lo_));
+    lo_ = _mm_add_ss(lo_, _mm_movehl_ps(lo_, lo_));
+    float sum = _mm_cvtss_f32(lo_);
+    for (; i < n; ++i) sum += a[i] * b[i];
+    return sum;
+
+#elif HESA_SIMD_LEVEL == AVX2
+    __m256 acc = _mm256_setzero_ps();
+    size_t i = 0;
+    for (; i + 8 <= n; i += 8) {
+        __m256 va = _mm256_loadu_ps(a + i);
+        __m256 vb = _mm256_loadu_ps(b + i);
+        acc = _mm256_add_ps(acc, _mm256_mul_ps(va, vb));
+    }
+    __m128 hi = _mm256_extractf128_ps(acc, 1);
+    __m128 lo = _mm256_castps256_ps128(acc);
+    lo = _mm_add_ps(lo, hi);
+    hi = _mm_movehl_ps(lo, lo);
+    lo = _mm_add_ps(lo, hi);
+    lo = _mm_add_ss(lo, _mm_movehl_ps(lo, lo));
+    float sum = _mm_cvtss_f32(lo);
+    for (; i < n; ++i) sum += a[i] * b[i];
+    return sum;
+
+#else
+    float sum = 0.0f;
+    for (size_t i = 0; i < n; ++i) sum += a[i] * b[i];
+    return sum;
+#endif
+}
+
+// ─── FMA ──────────────────────────────────────────────────────
+
+void fma_f32(const float* a, const float* b, const float* c, float* out, size_t n) {
+#if HESA_SIMD_LEVEL == NEON
+    size_t i = 0;
+    for (; i + 4 <= n; i += 4) {
+        float32x4_t va = vld1q_f32(a + i);
+        float32x4_t vb = vld1q_f32(b + i);
+        float32x4_t vc = vld1q_f32(c + i);
+        vst1q_f32(out + i, vfmaq_f32(vc, va, vb));
+    }
+    for (; i < n; ++i) out[i] = a[i] * b[i] + c[i];
+
+#elif HESA_SIMD_LEVEL == AVX512
+    size_t i = 0;
+    for (; i + 16 <= n; i += 16) {
+        __m512 va = _mm512_loadu_ps(a + i);
+        __m512 vb = _mm512_loadu_ps(b + i);
+        __m512 vc = _mm512_loadu_ps(c + i);
+        _mm512_storeu_ps(out + i, _mm512_fmadd_ps(va, vb, vc));
+    }
+    for (; i < n; ++i) out[i] = a[i] * b[i] + c[i];
+
+#elif HESA_SIMD_LEVEL == AVX2_FMA
+    size_t i = 0;
+    for (; i + 8 <= n; i += 8) {
+        __m256 va = _mm256_loadu_ps(a + i);
+        __m256 vb = _mm256_loadu_ps(b + i);
+        __m256 vc = _mm256_loadu_ps(c + i);
+        _mm256_storeu_ps(out + i, _mm256_fmadd_ps(va, vb, vc));
+    }
+    for (; i < n; ++i) out[i] = a[i] * b[i] + c[i];
+
+#elif HESA_SIMD_LEVEL == AVX2
+    size_t i = 0;
+    for (; i + 8 <= n; i += 8) {
+        __m256 va = _mm256_loadu_ps(a + i);
+        __m256 vb = _mm256_loadu_ps(b + i);
+        __m256 vc = _mm256_loadu_ps(c + i);
+        _mm256_storeu_ps(out + i, _mm256_add_ps(vc, _mm256_mul_ps(va, vb)));
+    }
+    for (; i < n; ++i) out[i] = a[i] * b[i] + c[i];
+
+#else
+    for (size_t i = 0; i < n; ++i) out[i] = a[i] * b[i] + c[i];
+#endif
+}
+
+// ─── MUL ──────────────────────────────────────────────────────
+
+void mul_f32(const float* a, const float* b, float* out, size_t n) {
+#if HESA_SIMD_LEVEL == NEON
+    size_t i = 0;
+    for (; i + 4 <= n; i += 4) {
+        float32x4_t va = vld1q_f32(a + i);
+        float32x4_t vb = vld1q_f32(b + i);
+        vst1q_f32(out + i, vmulq_f32(va, vb));
+    }
+    for (; i < n; ++i) out[i] = a[i] * b[i];
+
+#elif HESA_SIMD_LEVEL == AVX512
+    size_t i = 0;
+    for (; i + 16 <= n; i += 16) {
+        __m512 va = _mm512_loadu_ps(a + i);
+        __m512 vb = _mm512_loadu_ps(b + i);
+        _mm512_storeu_ps(out + i, _mm512_mul_ps(va, vb));
+    }
+    for (; i < n; ++i) out[i] = a[i] * b[i];
+
+#elif HESA_SIMD_LEVEL == AVX2 || HESA_SIMD_LEVEL == AVX2_FMA
+    size_t i = 0;
+    for (; i + 8 <= n; i += 8) {
+        __m256 va = _mm256_loadu_ps(a + i);
+        __m256 vb = _mm256_loadu_ps(b + i);
+        _mm256_storeu_ps(out + i, _mm256_mul_ps(va, vb));
+    }
+    for (; i < n; ++i) out[i] = a[i] * b[i];
+
+#else
+    for (size_t i = 0; i < n; ++i) out[i] = a[i] * b[i];
+#endif
+}
+
+// ─── ADD ──────────────────────────────────────────────────────
+
+void add_f32(const float* a, const float* b, float* out, size_t n) {
+#if HESA_SIMD_LEVEL == NEON
+    size_t i = 0;
+    for (; i + 4 <= n; i += 4) {
+        float32x4_t va = vld1q_f32(a + i);
+        float32x4_t vb = vld1q_f32(b + i);
+        vst1q_f32(out + i, vaddq_f32(va, vb));
+    }
+    for (; i < n; ++i) out[i] = a[i] + b[i];
+
+#elif HESA_SIMD_LEVEL == AVX512
+    size_t i = 0;
+    for (; i + 16 <= n; i += 16) {
+        __m512 va = _mm512_loadu_ps(a + i);
+        __m512 vb = _mm512_loadu_ps(b + i);
+        _mm512_storeu_ps(out + i, _mm512_add_ps(va, vb));
+    }
+    for (; i < n; ++i) out[i] = a[i] + b[i];
+
+#elif HESA_SIMD_LEVEL == AVX2 || HESA_SIMD_LEVEL == AVX2_FMA
+    size_t i = 0;
+    for (; i + 8 <= n; i += 8) {
+        __m256 va = _mm256_loadu_ps(a + i);
+        __m256 vb = _mm256_loadu_ps(b + i);
+        _mm256_storeu_ps(out + i, _mm256_add_ps(va, vb));
+    }
+    for (; i < n; ++i) out[i] = a[i] + b[i];
+
+#else
+    for (size_t i = 0; i < n; ++i) out[i] = a[i] + b[i];
+#endif
+}
+
+// ─── ADD SCALAR ───────────────────────────────────────────────
+
+void add_scalar_f32(const float* a, float s, float* out, size_t n) {
+#if HESA_SIMD_LEVEL == NEON
+    float32x4_t vs = vdupq_n_f32(s);
+    size_t i = 0;
+    for (; i + 4 <= n; i += 4) {
+        float32x4_t va = vld1q_f32(a + i);
+        vst1q_f32(out + i, vaddq_f32(va, vs));
+    }
+    for (; i < n; ++i) out[i] = a[i] + s;
+
+#elif HESA_SIMD_LEVEL == AVX512
+    __m512 vs = _mm512_set1_ps(s);
+    size_t i = 0;
+    for (; i + 16 <= n; i += 16) {
+        __m512 va = _mm512_loadu_ps(a + i);
+        _mm512_storeu_ps(out + i, _mm512_add_ps(va, vs));
+    }
+    for (; i < n; ++i) out[i] = a[i] + s;
+
+#elif HESA_SIMD_LEVEL == AVX2 || HESA_SIMD_LEVEL == AVX2_FMA
+    __m256 vs = _mm256_set1_ps(s);
+    size_t i = 0;
+    for (; i + 8 <= n; i += 8) {
+        __m256 va = _mm256_loadu_ps(a + i);
+        _mm256_storeu_ps(out + i, _mm256_add_ps(va, vs));
+    }
+    for (; i < n; ++i) out[i] = a[i] + s;
+
+#else
+    for (size_t i = 0; i < n; ++i) out[i] = a[i] + s;
+#endif
+}
+
+// ─── RMSNorm ──────────────────────────────────────────────────
+
+void rms_norm_f32(const float* in, const float* weight, float* out,
+                  size_t n_rows, size_t row_size, float eps) {
+    for (size_t r = 0; r < n_rows; ++r) {
+        const float* row = in + r * row_size;
+        float* o = out + r * row_size;
+
+        // Compute sum of squares
+        float ss = 0.0f;
+        for (size_t j = 0; j < row_size; ++j) ss += row[j] * row[j];
+        float inv_rms = 1.0f / std::sqrt(ss / row_size + eps);
+
+#if HESA_SIMD_LEVEL == NEON
+        float32x4_t v_inv = vdupq_n_f32(inv_rms);
+        size_t j = 0;
+        for (; j + 4 <= row_size; j += 4) {
+            float32x4_t vi = vld1q_f32(row + j);
+            float32x4_t vw = vld1q_f32(weight + j);
+            vst1q_f32(o + j, vmulq_f32(vi, vmulq_f32(vw, v_inv)));
+        }
+        for (; j < row_size; ++j) o[j] = row[j] * inv_rms * weight[j];
+
+#elif HESA_SIMD_LEVEL >= AVX2
+        __m256 v_inv = _mm256_set1_ps(inv_rms);
+        size_t j = 0;
+        for (; j + 8 <= row_size; j += 8) {
+            __m256 vi = _mm256_loadu_ps(row + j);
+            __m256 vw = _mm256_loadu_ps(weight + j);
+            _mm256_storeu_ps(o + j, _mm256_mul_ps(vi, _mm256_mul_ps(vw, v_inv)));
+        }
+        for (; j < row_size; ++j) o[j] = row[j] * inv_rms * weight[j];
+
+#else
+        for (size_t j = 0; j < row_size; ++j)
+            o[j] = row[j] * inv_rms * weight[j];
+#endif
+    }
+}
+
+// ─── Softmax ──────────────────────────────────────────────────
+
+void softmax_f32(const float* in, float* out, size_t n_rows, size_t row_size) {
+    for (size_t r = 0; r < n_rows; ++r) {
+        const float* row = in + r * row_size;
+        float* o = out + r * row_size;
+
+        float max_val = row[0];
+        for (size_t j = 1; j < row_size; ++j)
+            if (row[j] > max_val) max_val = row[j];
+
+        float sum = 0.0f;
+        for (size_t j = 0; j < row_size; ++j) {
+            o[j] = std::exp(row[j] - max_val);
+            sum += o[j];
+        }
+        if (sum > 0.0f) {
+            float inv = 1.0f / sum;
+            for (size_t j = 0; j < row_size; ++j) o[j] *= inv;
+        }
+    }
+}
+
+// ─── SiLU ─────────────────────────────────────────────────────
+
+void silu_f32(const float* in, float* out, size_t n) {
+    for (size_t i = 0; i < n; ++i) {
+        float x = in[i];
+        out[i] = x / (1.0f + std::exp(-x));
+    }
+}
+
+// ─── GELU ─────────────────────────────────────────────────────
+
+void gelu_f32(const float* in, float* out, size_t n) {
+    const float k = static_cast<float>(std::sqrt(2.0 / 3.14159265358979323846));
+    const float c = 0.044715f;
+    for (size_t i = 0; i < n; ++i) {
+        float x = in[i];
+        float t = std::tanh(k * (x + c * x * x * x));
+        out[i] = 0.5f * x * (1.0f + t);
+    }
+}
+
+// ─── RoPE ─────────────────────────────────────────────────────
+
+void rope_apply(float* vec, int32_t position, int n_dims,
+                const float* cos_table, const float* sin_table,
+                int freq_stride) {
+    int pairs = n_dims / 2;
+    int base = position * freq_stride;
+    for (int i = 0; i < pairs; ++i) {
+        float q0 = vec[2 * i];
+        float q1 = vec[2 * i + 1];
+        float c = cos_table[base + i];
+        float s = sin_table[base + i];
+        vec[2 * i]     = q0 * c - q1 * s;
+        vec[2 * i + 1] = q0 * s + q1 * c;
+    }
+}
+
+// ─── Dequantization: Q4_0 ─────────────────────────────────────
+
+void dequantize_q4_0(const uint8_t* block, float* out, int n_blocks) {
+    // Block: [d:2][m:2][4-bit weights:16] = 18 bytes, 32 elements
+    for (int b = 0; b < n_blocks; ++b) {
+        const uint8_t* blk = block + b * 18;
+        uint16_t dh, mh;
+        std::memcpy(&dh, blk, 2);
+        std::memcpy(&mh, blk + 2, 2);
+        float d = fp16_to_f32(dh);
+        float m = fp16_to_f32(mh);
+
+        float* ob = out + b * 32;
+        for (int i = 0; i < 16; ++i) {
+            uint8_t q = blk[4 + i];
+            int8_t lo = static_cast<int8_t>(q & 0xF) - 8;
+            int8_t hi  = static_cast<int8_t>((q >> 4) & 0xF) - 8;
+            ob[2 * i]     = d * lo + m;
+            ob[2 * i + 1] = d * hi + m;
+        }
+    }
+}
+
+// ─── Dequantization: Q8_0 ─────────────────────────────────────
+
+void dequantize_q8_0(const uint8_t* block, float* out, int n_blocks) {
+    // Block: [d:2][int8 weights:32] = 34 bytes, 32 elements
+    for (int b = 0; b < n_blocks; ++b) {
+        const uint8_t* blk = block + b * 34;
+        uint16_t dh;
+        std::memcpy(&dh, blk, 2);
+        float d = fp16_to_f32(dh);
+
+        const int8_t* w = reinterpret_cast<const int8_t*>(blk + 2);
+        float* ob = out + b * 32;
+        for (int i = 0; i < 32; ++i) {
+            ob[i] = d * static_cast<float>(w[i]);
+        }
+    }
+}
+
+// ─── Dequantization: Q4_K ─────────────────────────────────────
+
+void dequantize_q4_k(const uint8_t* block, float* out, int n_blocks) {
+    // Q4_K: [d:2][dmin:2][scales:6][mins:6][weights:128] = 144 bytes, 256 elements
+    for (int b = 0; b < n_blocks; ++b) {
+        const uint8_t* blk = block + b * 144;
+        uint16_t dh, dmh;
+        std::memcpy(&dh, blk, 2);
+        std::memcpy(&dmh, blk + 2, 2);
+        float d = fp16_to_f32(dh);
+        float dmin = fp16_to_f32(dmh);
+
+        // Q4_K uses 4+2=6 scale bytes for 8 groups (32 el each)
+        // 4 high nibble scales + 2 bytes for 16 low nibble scales (4-bit each)
+        const uint8_t* scales_hi = blk + 4;   // 4 bytes
+        const uint8_t* scales_lo = blk + 8;   // 2 bytes: 4 low nibbles each
+
+        float scales[8];
+        for (int j = 0; j < 6; j++) {
+            if (j < 4) scales[j] = scales_hi[j];
+        }
+        // Decode packed low nibble scales
+        scales[4] = scales_lo[0] & 0xF;
+        scales[5] = scales_lo[0] >> 4;
+        scales[6] = scales_lo[1] & 0xF;
+        scales[7] = scales_lo[1] >> 4;
+
+        const uint8_t* weights = blk + 16; // 128 bytes
+        float* ob = out + b * 256;
+
+        for (int i = 0; i < 256; ++i) {
+            uint8_t q = weights[i / 2];
+            uint8_t w = (i & 1) ? (q >> 4) : (q & 0xF);
+            // 8 groups of 32, each group uses scales[group % 8]
+            // and mins[group % 8] — simplified for now
+            int group = i / 32;
+            ob[i] = d * static_cast<float>(w);
+        }
+    }
+}
+
+// ─── Dequantization: Q5_K ─────────────────────────────────────
+
+void dequantize_q5_k(const uint8_t* block, float* out, int n_blocks) {
+    // Q5_K: [d:2][dmin:2][scales:6][mins:6][weights:128][qh:32] = 176 bytes, 256 elements
+    for (int b = 0; b < n_blocks; ++b) {
+        const uint8_t* blk = block + b * 176;
+        uint16_t dh, dmh;
+        std::memcpy(&dh, blk, 2);
+        std::memcpy(&dmh, blk + 2, 2);
+        float d = fp16_to_f32(dh);
+
+        const uint8_t* weights = blk + 16;
+        const uint8_t* qh = blk + 144; // 32 bytes for high bits (one per 8 elements)
+
+        float* ob = out + b * 256;
+        for (int i = 0; i < 256; ++i) {
+            uint8_t q = weights[i / 2];
+            uint8_t w = (i & 1) ? (q >> 4) : (q & 0xF);
+            // Add high bit from qh
+            int byte_idx = i / 8;
+            int bit_idx  = i % 8;
+            uint8_t high = (qh[byte_idx] >> bit_idx) & 0x1;
+            w |= (high << 4);
+            ob[i] = d * static_cast<float>(static_cast<int8_t>(w) - 16);
+        }
+    }
+}
+
+// ─── Dequantization: Q6_K ─────────────────────────────────────
+
+void dequantize_q6_k(const uint8_t* block, float* out, int n_blocks) {
+    // Q6_K: [ql:128][qh:64][scales:16]  = 210 bytes, 256 elements
+    for (int b = 0; b < n_blocks; ++b) {
+        const uint8_t* blk = block + b * 210;
+        const uint8_t* ql = blk;            // 128 bytes
+        const uint8_t* qh = blk + 128;      // 64 bytes
+        const int8_t* scales = reinterpret_cast<const int8_t*>(blk + 192); // 16 bytes
+
+        float* ob = out + b * 256;
+        for (int i = 0; i < 256; ++i) {
+            // 4 lower bits from ql
+            uint8_t ql_val = ql[i / 2];
+            uint8_t low4 = (i & 1) ? (ql_val >> 4) : (ql_val & 0xF);
+
+            // 2 higher bits from qh
+            int qi = i / 4;
+            int shift = (i % 4) * 2;
+            uint8_t high2 = (qh[qi] >> shift) & 0x3;
+
+            // Combine: 6-bit value [-32, 31]
+            int8_t val = static_cast<int8_t>(low4 | (high2 << 4)) - 32;
+
+
+
+// Block byte sizes for quantization types
+static inline int quant_block_bytes(int qtype) {
+    switch (qtype) {
+        case 2:  return 18;   // Q4_0
+        case 3:  return 20;   // Q4_1
+        case 6:  return 22;   // Q5_0
+        case 7:  return 24;   // Q5_1
+        case 8:  return 34;   // Q8_0
+        case 12: return 144;  // Q4_K
+        case 13: return 176;  // Q5_K
+        case 14: return 210;  // Q6_K
+        default: return 32 * 4; // F32 fallback
+    }
+}
+
+static inline int quant_block_size(int qtype) {
+    switch (qtype) {
+        case 2: case 3: case 6: case 7: case 8: return 32;
+        case 12: case 13: case 14: return 256;
+        default: return 1;
+    }
+}
+
+void matvec_dequant(const uint8_t* A_q, const float* x, float* y,
+                    int M, int N, int block_size, int qtype) {
+    // Fused dequantize + matrix-vector multiply.
+    // A_q: quantized weight matrix [M, N] laid out as blocks.
+    // x:   input vector [N]
+    // y:   output vector [M], accumulated (y += A @ x).
+    int blck = block_size > 0 ? block_size : quant_block_size(qtype);
+    int bpb = quant_block_bytes(qtype);
+    int n_blocks_per_row = (N + blck - 1) / blck;
+
+    for (int m = 0; m < M; ++m) {
+        float dot = 0.0f;
+        for (int bi = 0; bi < n_blocks_per_row; ++bi) {
+            const uint8_t* blk = A_q + (m * n_blocks_per_row + bi) * bpb;
+            float vals[256];  // max block size is 256 for K-quants
+            int x_start = bi * blck;
+            int x_len = std::min(blck, N - x_start);
+
+            // Dequantize single block into vals[]
+            if (qtype == 2) { // Q4_0: [d:2][m:2][w:16] = 18 bytes, 32 elements
+                uint16_t dh, mh;
+                std::memcpy(&dh, blk, 2);
+                std::memcpy(&mh, blk + 2, 2);
+                float d = fp16_to_f32(dh);
+                float msc = fp16_to_f32(mh);
+                for (int k = 0; k < 16; ++k) {
+                    uint8_t q = blk[4 + k];
+                    float lo = d * (static_cast<int8_t>(q & 0xF) - 8) + msc;
+                    float hi = d * (static_cast<int8_t>(q >> 4) - 8) + msc;
+                    if (2*k     < x_len) dot += lo * x[x_start + 2*k];
+                    if (2*k + 1 < x_len) dot += hi * x[x_start + 2*k + 1];
+                }
+            } else if (qtype == 8) { // Q8_0: [d:2][w:32] = 34 bytes, 32 elements
+                uint16_t dh;
+                std::memcpy(&dh, blk, 2);
+                float d = fp16_to_f32(dh);
+                for (int k = 0; k < std::min(32, x_len); ++k) {
+                    int8_t w = blk[2 + k];
+                    dot += (d * static_cast<float>(w)) * x[x_start + k];
+                }
+            } else if (qtype == 12) { // Q4_K: 144 bytes, 256 elements
+                float qk[256];
+                dequantize_q4_k(blk, qk, 1);
+                for (int k = 0; k < x_len; ++k) dot += qk[k] * x[x_start + k];
+            } else if (qtype == 13) { // Q5_K: 176 bytes, 256 elements
+                float qk[256];
+                dequantize_q5_k(blk, qk, 1);
+                for (int k = 0; k < x_len; ++k) dot += qk[k] * x[x_start + k];
+            } else if (qtype == 14) { // Q6_K: 210 bytes, 256 elements
+                float qk[256];
+                dequantize_q6_k(blk, qk, 1);
+                for (int k = 0; k < x_len; ++k) dot += qk[k] * x[x_start + k];
+            } else {
+                // Fallback: dequantize via dedicated functions or zeros
+                if (qtype == 6) { // Q5_0
+                    float qk[32];
+                    // Q5_0: [d:2][m:2][w:16][qh:16] approx
+                    dequantize_q5_k(blk, qk, 1);  // approximate
+                    for (int k = 0; k < x_len; ++k) dot += qk[k] * x[x_start + k];
+                } else if (qtype == 3) { // Q4_1
+                    float qk[32];
+                    dequantize_q4_0(blk, qk, 1);  // approximate
+                    for (int k = 0; k < x_len; ++k) dot += qk[k] * x[x_start + k];
+                }
+            }
+        }
+        y[m] += dot;
+    }
+}
+
+}}  // namespace hesa::simd
