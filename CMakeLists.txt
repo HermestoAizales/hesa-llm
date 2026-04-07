@@ -5,7 +5,7 @@ project(hesa-llm
     LANGUAGES   CXX
 )
 
-# -- C++20 (coroutines, concepts, std::span, std::expected) --
+# -- C++23 (coroutines, concepts, std::span, std::expected) --
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -46,6 +46,7 @@ message(STATUS "HESA Platform: ${HESA_PLATFORM} Arch: ${HESA_ARCH}")
 option(HESA_ENABLE_CUDA  "Enable CUDA backend"     OFF)
 option(HESA_ENABLE_METAL "Enable Metal backend"    OFF)
 option(HESA_ENABLE_TESTS "Build unit tests"        ON)
+option(HESA_ENABLE_SERVER "Build HTTP server"      ON)
 
 if(APPLE)
     list(APPEND CMAKE_PREFIX_PATH /Applications)
@@ -74,6 +75,15 @@ FetchContent_Declare(
     URL_HASH SHA256=d6c65aca6b1ed68e7a182f4757257b107ae403032760ed6ef121c9d55e81757d
 )
 FetchContent_MakeAvailable(nlohmann_json)
+
+# -- FetchContent: cpp-httplib for HTTP server (header-only) --
+FetchContent_Declare(
+    httplib
+    GIT_REPOSITORY https://github.com/yhirose/cpp-httplib.git
+    GIT_TAG        v0.16.0
+    EXCLUDE_FROM_ALL
+)
+FetchContent_MakeAvailable(httplib)
 
 # -- Core library sources --
 set(HESA_CORE_SRCS
@@ -165,6 +175,20 @@ endif()
 # -- Main executable --
 add_executable(hesa-llm src/main.cpp)
 target_link_libraries(hesa-llm PRIVATE hesa_core)
+
+# -- HTTP Server (OpenAI-compatible API) --
+if(HESA_ENABLE_SERVER)
+    set(HESA_SERVER_SRCS
+        src/server/server.cpp
+        src/server/openai_api.cpp
+        src/server/chat_handler.cpp
+    )
+    
+    add_executable(hesa-server ${HESA_SERVER_SRCS})
+    target_link_libraries(hesa-server PRIVATE hesa_core httplib nlohmann_json::nlohmann_json)
+    target_compile_options(hesa-server PRIVATE -pthread)
+    target_link_options(hesa-server PRIVATE -pthread)
+endif()
 
 # -- Testing --
 if(HESA_ENABLE_TESTS)

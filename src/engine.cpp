@@ -1,6 +1,7 @@
 #include "hesa/engine.hpp"
 #include "backend/cpu_backend.hpp"
 #include "transformer_block.hpp"
+#include "hesa/simd.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -158,24 +159,73 @@ Result<void> Engine::forward_single_token(int32_t token_id,
         }
     }
 
-    if (!emb || emb->dtype() != Dtype::F32 || emb->ndim() < 2) {
+    if (!emb || emb->ndim() < 2) {
         return make_error<void>(Error::TENSOR_NOT_FOUND);
     }
 
     size_t emb_vocab  = static_cast<size_t>(emb->shape()[0]);
     size_t emb_hidden = static_cast<size_t>(emb->shape()[1]);
 
+    Dtype edt = emb->dtype();
+
     if (static_cast<size_t>(token_id) >= emb_vocab) {
         return make_error<void>(Error::INVALID_ARGUMENT);
     }
-
-    const float* edata = static_cast<const float*>(emb->data());
     if (out_hidden.size() < emb_hidden)
         return make_error<void>(Error::INVALID_ARGUMENT);
 
-    std::memcpy(out_hidden.data(),
-                edata + static_cast<size_t>(token_id) * emb_hidden,
-                emb_hidden * sizeof(float));
+    if (edt == Dtype::F32) {
+        const float* edata = static_cast<const float*>(emb->data());
+        std::memcpy(out_hidden.data(),
+                    edata + static_cast<size_t>(token_id) * emb_hidden,
+                    emb_hidden * sizeof(float));
+    } else {
+        const uint8_t* raw = static_cast<const uint8_t*>(emb->data());
+        size_t row_byte_off = 0;
+        int n_blocks = 0;
+        switch (edt) {
+            case Dtype::Q4_0: {
+                n_blocks = static_cast<int>(emb_hidden / 32);
+                row_byte_off = static_cast<size_t>(token_id) * n_blocks * 18;
+                simd::dequantize_q4_0(raw + row_byte_off, out_hidden.data(), n_blocks);
+                break;
+            }
+            case Dtype::Q8_0: {
+                n_blocks = static_cast<int>(emb_hidden / 32);
+                row_byte_off = static_cast<size_t>(token_id) * n_blocks * 34;
+                simd::dequantize_q8_0(raw + row_byte_off, out_hidden.data(), n_blocks);
+                break;
+            }
+            case Dtype::Q4_K: {
+                n_blocks = static_cast<int>(emb_hidden / 256);
+                row_byte_off = static_cast<size_t>(token_id) * n_blocks * 144;
+                simd::dequantize_q4_k(raw + row_byte_off, out_hidden.data(), n_blocks);
+                break;
+            }
+            case Dtype::Q5_K: {
+                n_blocks = static_cast<int>(emb_hidden / 256);
+                row_byte_off = static_cast<size_t>(token_id) * n_blocks * 176;
+                simd::dequantize_q5_k(raw + row_byte_off, out_hidden.data(), n_blocks);
+                break;
+            }
+            case Dtype::Q6_K: {
+                n_blocks = static_cast<int>(emb_hidden / 256);
+                row_byte_off = static_cast<size_t>(token_id) * n_blocks * 210;
+                simd::dequantize_q6_k(raw + row_byte_off, out_hidden.data(), n_blocks);
+                break;
+            }
+            case Dtype::F16:
+            case Dtype::BF16: {
+                const uint16_t* fp16 = reinterpret_cast<const uint16_t*>(
+                    raw + static_cast<size_t>(token_id) * emb_hidden * 2);
+                for (size_t i = 0; i < emb_hidden; ++i)
+                    out_hidden[i] = simd::fp16_to_f32(fp16[i]);
+                break;
+            }
+            default:
+                return make_error<void>(Error::INTERNAL_ERROR);
+        }
+    }
     for (size_t i = emb_hidden; i < hidden; ++i)
         out_hidden[i] = 0.0f;
 
@@ -256,22 +306,86 @@ Result<void> Engine::compute_logits(const std::vector<float>& hidden,
             logits_out[v] = sum / std::sqrt(static_cast<float>(hidden_dim));
         }
     } else {
-        // Tied weights: use transposed embedding
+        // Tied weights: use transposed embedding (may be quantized)
         Tensor const* emb = nullptr;
+        Dtype edt = Dtype::F32;
         for (const char* name : {"token_embd.weight", "tok_embeddings.weight"}) {
             auto r = model_->get_tensor(std::string(name));
-            if (r) { emb = *r; break; }
+            if (r) { emb = *r; edt = emb->dtype(); break; }
         }
-        if (emb && emb->dtype() == Dtype::F32 && emb->ndim() >= 2) {
+        if (emb && emb->ndim() >= 2) {
             size_t e_rows = static_cast<size_t>(emb->shape()[0]);
             size_t e_cols = static_cast<size_t>(emb->shape()[1]);
-            const float* ed = static_cast<const float*>(emb->data());
 
-            for (size_t v = 0; v < std::min(vocab, logits_out.size()) && v < e_rows; ++v) {
+            size_t limit = std::min(vocab, logits_out.size());
+            limit = std::min(limit, e_rows);
+            size_t col_limit = std::min(hidden_dim, e_cols);
+            float sqrt_hd = std::sqrt(static_cast<float>(hidden_dim));
+
+            // Reusable dequant buffer
+            std::vector<float> deq_buf;
+
+            for (size_t v = 0; v < limit; ++v) {
                 float sum = 0.0f;
-                for (size_t h = 0; h < std::min(hidden_dim, e_cols); ++h)
-                    sum += ed[v * e_cols + h] * hidden[h];
-                logits_out[v] = sum / std::sqrt(static_cast<float>(hidden_dim));
+
+                if (edt == Dtype::F32) {
+                    const float* ed = static_cast<const float*>(emb->data());
+                    for (size_t h = 0; h < col_limit; ++h)
+                        sum += ed[v * e_cols + h] * hidden[h];
+                } else {
+                    if (deq_buf.size() < e_cols)
+                        deq_buf.resize(e_cols);
+
+                    const uint8_t* raw = static_cast<const uint8_t*>(emb->data());
+                    switch (edt) {
+                        case Dtype::Q4_0: {
+                            int nb = static_cast<int>(e_cols / 32);
+                            simd::dequantize_q4_0(raw + v * nb * 18, deq_buf.data(), nb);
+                            for (size_t h = 0; h < col_limit; ++h)
+                                sum += deq_buf[h] * hidden[h];
+                            break;
+                        }
+                        case Dtype::Q8_0: {
+                            int nb = static_cast<int>(e_cols / 32);
+                            simd::dequantize_q8_0(raw + v * nb * 34, deq_buf.data(), nb);
+                            for (size_t h = 0; h < col_limit; ++h)
+                                sum += deq_buf[h] * hidden[h];
+                            break;
+                        }
+                        case Dtype::Q4_K: {
+                            int nb = static_cast<int>(e_cols / 256);
+                            simd::dequantize_q4_k(raw + v * nb * 144, deq_buf.data(), nb);
+                            for (size_t h = 0; h < col_limit; ++h)
+                                sum += deq_buf[h] * hidden[h];
+                            break;
+                        }
+                        case Dtype::Q5_K: {
+                            int nb = static_cast<int>(e_cols / 256);
+                            simd::dequantize_q5_k(raw + v * nb * 176, deq_buf.data(), nb);
+                            for (size_t h = 0; h < col_limit; ++h)
+                                sum += deq_buf[h] * hidden[h];
+                            break;
+                        }
+                        case Dtype::Q6_K: {
+                            int nb = static_cast<int>(e_cols / 256);
+                            simd::dequantize_q6_k(raw + v * nb * 210, deq_buf.data(), nb);
+                            for (size_t h = 0; h < col_limit; ++h)
+                                sum += deq_buf[h] * hidden[h];
+                            break;
+                        }
+                        case Dtype::F16:
+                        case Dtype::BF16: {
+                            const uint16_t* fp16 = reinterpret_cast<const uint16_t*>(
+                                raw + v * e_cols * 2);
+                            for (size_t h = 0; h < col_limit; ++h)
+                                sum += simd::fp16_to_f32(fp16[h]) * hidden[h];
+                            break;
+                        }
+                        default:
+                            break;
+                    }
+                }
+                logits_out[v] = sum / sqrt_hd;
             }
         } else {
             fprintf(stderr, "[Engine] No output weight found; using hidden as logits\n");
