@@ -86,6 +86,7 @@ set(HESA_CORE_SRCS
     # Backend
     src/backend/backend.cpp
     src/backend/cpu_backend.cpp
+    src/backend/simd.cpp
 
     # Model / GGUF parser
     src/gguf_parser.cpp

@@ -143,10 +143,9 @@ public:
 
 private:
     struct Impl;
-    std::unique_ptr<Impl> impl_;
-
     Dtype dtype_ = Dtype::F32;
     Shape shape_;
+    std::unique_ptr<Impl> impl_;
     Backend* backend_ = nullptr;
     std::string name_;
 };

@@ -364,6 +364,48 @@ void rope_apply(float* vec, int32_t position, int n_dims,
     }
 }
 
+// ─── FMA with scalar ──────────────────────────────────────────
+
+void fma_scalar_f32(const float* a, const float* b, float c, float* out, size_t n) {
+#if HESA_SIMD_LEVEL == NEON
+    float32x4_t vs = vdupq_n_f32(c);
+    size_t i = 0;
+    for (; i + 4 <= n; i += 4) {
+        float32x4_t va = vld1q_f32(a + i);
+        float32x4_t vb = vld1q_f32(b + i);
+        vst1q_f32(out + i, vfmaq_f32(vs, va, vb));
+    }
+    for (; i < n; ++i) out[i] = a[i] * b[i] + c;
+
+#elif HESA_SIMD_LEVEL == AVX512
+    __m512 vs = _mm512_set1_ps(c);
+    size_t i = 0;
+    for (; i + 16 <= n; i += 16) {
+        __m512 va = _mm512_loadu_ps(a + i);
+        __m512 vb = _mm512_loadu_ps(b + i);
+        _mm512_storeu_ps(out + i, _mm512_fmadd_ps(va, vb, vs));
+    }
+    for (; i < n; ++i) out[i] = a[i] * b[i] + c;
+
+#elif HESA_SIMD_LEVEL == AVX2 || HESA_SIMD_LEVEL == AVX2_FMA
+    __m256 vs = _mm256_set1_ps(c);
+    size_t i = 0;
+    for (; i + 8 <= n; i += 8) {
+        __m256 va = _mm256_loadu_ps(a + i);
+        __m256 vb = _mm256_loadu_ps(b + i);
+#if HESA_SIMD_LEVEL == AVX2_FMA
+        _mm256_storeu_ps(out + i, _mm256_fmadd_ps(va, vb, vs));
+#else
+        _mm256_storeu_ps(out + i, _mm256_add_ps(vs, _mm256_mul_ps(va, vb)));
+#endif
+    }
+    for (; i < n; ++i) out[i] = a[i] * b[i] + c;
+
+#else
+    for (size_t i = 0; i < n; ++i) out[i] = a[i] * b[i] + c;
+#endif
+}
+
 // ─── Dequantization: Q4_0 ─────────────────────────────────────
 
 void dequantize_q4_0(const uint8_t* block, float* out, int n_blocks) {
@@ -408,7 +450,10 @@ void dequantize_q8_0(const uint8_t* block, float* out, int n_blocks) {
 // ─── Dequantization: Q4_K ─────────────────────────────────────
 
 void dequantize_q4_k(const uint8_t* block, float* out, int n_blocks) {
-    // Q4_K: [d:2][dmin:2][scales:6][mins:6][weights:128] = 144 bytes, 256 elements
+    // Q4_K: [d:2][dmin:2][scales_k:12][weights:128] = 144 bytes, 256 elements
+    // GGML format: 8 groups of 32 elements. 12-byte scales_k encodes 16 6-bit values
+    // (8 scales + 8 mins) packed as 4 bytes each for s0-3 and m0-3, then 2 bytes each
+    // for the low 2 bits.
     for (int b = 0; b < n_blocks; ++b) {
         const uint8_t* blk = block + b * 144;
         uint16_t dh, dmh;
@@ -417,31 +462,40 @@ void dequantize_q4_k(const uint8_t* block, float* out, int n_blocks) {
         float d = fp16_to_f32(dh);
         float dmin = fp16_to_f32(dmh);
 
-        // Q4_K uses 4+2=6 scale bytes for 8 groups (32 el each)
-        // 4 high nibble scales + 2 bytes for 16 low nibble scales (4-bit each)
-        const uint8_t* scales_hi = blk + 4;   // 4 bytes
-        const uint8_t* scales_lo = blk + 8;   // 2 bytes: 4 low nibbles each
+        // 12 bytes of packed scale+min data at offset 4
+        const uint8_t* sk = blk + 4;
 
-        float scales[8];
-        for (int j = 0; j < 6; j++) {
-            if (j < 4) scales[j] = scales_hi[j];
-        }
-        // Decode packed low nibble scales
-        scales[4] = scales_lo[0] & 0xF;
-        scales[5] = scales_lo[0] >> 4;
-        scales[6] = scales_lo[1] & 0xF;
-        scales[7] = scales_lo[1] >> 4;
+        // Extract 8 scale values from first 6 bytes
+        uint8_t scales[8], mins[8];
+        scales[0] = sk[0] & 63;
+        scales[1] = sk[1] & 63;
+        scales[2] = sk[2] & 63;
+        scales[3] = sk[3] & 63;
+        scales[4] = ((sk[0] >> 6) << 4) | (sk[4] & 15);
+        scales[5] = ((sk[1] >> 6) << 4) | (sk[4] >> 4);
+        scales[6] = ((sk[2] >> 6) << 4) | (sk[5] & 15);
+        scales[7] = ((sk[3] >> 6) << 4) | (sk[5] >> 4);
 
-        const uint8_t* weights = blk + 16; // 128 bytes
+        // Extract 8 min values from bytes 6-11
+        mins[0] = sk[6] & 63;
+        mins[1] = sk[7] & 63;
+        mins[2] = sk[8] & 63;
+        mins[3] = sk[9] & 63;
+        mins[4] = ((sk[6] >> 6) << 4) | (sk[10] & 15);
+        mins[5] = ((sk[7] >> 6) << 4) | (sk[10] >> 4);
+        mins[6] = ((sk[8] >> 6) << 4) | (sk[11] & 15);
+        mins[7] = ((sk[9] >> 6) << 4) | (sk[11] >> 4);
+
+        const uint8_t* weights = blk + 16; // 128 bytes, 4-bit packed
         float* ob = out + b * 256;
 
         for (int i = 0; i < 256; ++i) {
             uint8_t q = weights[i / 2];
             uint8_t w = (i & 1) ? (q >> 4) : (q & 0xF);
-            // 8 groups of 32, each group uses scales[group % 8]
-            // and mins[group % 8] — simplified for now
             int group = i / 32;
-            ob[i] = d * static_cast<float>(w);
+            // GGML formula: val = d * scale[group] * w - dmin * min[group]
+            ob[i] = d * static_cast<float>(scales[group]) * static_cast<float>(w)
+                  - dmin * static_cast<float>(mins[group]);
         }
     }
 }
@@ -449,27 +503,59 @@ void dequantize_q4_k(const uint8_t* block, float* out, int n_blocks) {
 // ─── Dequantization: Q5_K ─────────────────────────────────────
 
 void dequantize_q5_k(const uint8_t* block, float* out, int n_blocks) {
-    // Q5_K: [d:2][dmin:2][scales:6][mins:6][weights:128][qh:32] = 176 bytes, 256 elements
+    // Q5_K: [d:2][dmin:2][scales_k:12][weights:128][qh:32] = 176 bytes, 256 elements
+    // 8 groups of 32 elements. 5-bit weights = 4 low bits in qs + 1 high bit in qh.
+    // scales_k same packing as Q4_K: 12 bytes for 8 scales + 8 mins (6-bit each).
     for (int b = 0; b < n_blocks; ++b) {
         const uint8_t* blk = block + b * 176;
         uint16_t dh, dmh;
         std::memcpy(&dh, blk, 2);
         std::memcpy(&dmh, blk + 2, 2);
         float d = fp16_to_f32(dh);
+        float dmin = fp16_to_f32(dmh);
 
-        const uint8_t* weights = blk + 16;
-        const uint8_t* qh = blk + 144; // 32 bytes for high bits (one per 8 elements)
+        // 12 bytes of packed scale+min data at offset 4
+        const uint8_t* sk = blk + 4;
+
+        // Extract 8 scale values
+        uint8_t scales[8], mins[8];
+        scales[0] = sk[0] & 63;
+        scales[1] = sk[1] & 63;
+        scales[2] = sk[2] & 63;
+        scales[3] = sk[3] & 63;
+        scales[4] = ((sk[0] >> 6) << 4) | (sk[4] & 15);
+        scales[5] = ((sk[1] >> 6) << 4) | (sk[4] >> 4);
+        scales[6] = ((sk[2] >> 6) << 4) | (sk[5] & 15);
+        scales[7] = ((sk[3] >> 6) << 4) | (sk[5] >> 4);
+
+        // Extract 8 min values
+        mins[0] = sk[6] & 63;
+        mins[1] = sk[7] & 63;
+        mins[2] = sk[8] & 63;
+        mins[3] = sk[9] & 63;
+        mins[4] = ((sk[6] >> 6) << 4) | (sk[10] & 15);
+        mins[5] = ((sk[7] >> 6) << 4) | (sk[10] >> 4);
+        mins[6] = ((sk[8] >> 6) << 4) | (sk[11] & 15);
+        mins[7] = ((sk[9] >> 6) << 4) | (sk[11] >> 4);
+
+        const uint8_t* weights = blk + 16;  // 128 bytes, 4-bit low nibbles
+        const uint8_t* qh = blk + 144;       // 32 bytes, high bit per element
 
         float* ob = out + b * 256;
         for (int i = 0; i < 256; ++i) {
+            // 4 low bits from weights
             uint8_t q = weights[i / 2];
             uint8_t w = (i & 1) ? (q >> 4) : (q & 0xF);
-            // Add high bit from qh
+            // 1 high bit from qh (bit-per-element)
             int byte_idx = i / 8;
             int bit_idx  = i % 8;
             uint8_t high = (qh[byte_idx] >> bit_idx) & 0x1;
-            w |= (high << 4);
-            ob[i] = d * static_cast<float>(static_cast<int8_t>(w) - 16);
+            w |= (high << 4);  // Now w is 5-bit [0, 31]
+
+            int group = i / 32;
+            // GGML formula: val = d * scale[group] * w - dmin * min[group]
+            ob[i] = d * static_cast<float>(scales[group]) * static_cast<float>(w)
+                  - dmin * static_cast<float>(mins[group]);
         }
     }
 }
@@ -497,8 +583,78 @@ void dequantize_q6_k(const uint8_t* block, float* out, int n_blocks) {
 
             // Combine: 6-bit value [-32, 31]
             int8_t val = static_cast<int8_t>(low4 | (high2 << 4)) - 32;
+            ob[i] = static_cast<float>(val) * static_cast<float>(scales[i / 16]);
+        }
+    }
+}
 
+// ─── Quantization: F32 → Q4_0 ─────────────────────────────────
 
+void quantize_q4_0(const float* src, uint8_t* out, int n_blocks) {
+    // Q4_0: [d: fp16][m: fp16][16 bytes packed] = 18 bytes, 32 elements per block
+    for (int b = 0; b < n_blocks; ++b) {
+        const float* s = src + b * 32;
+        uint8_t* blk  = out + b * 18;
+
+        // Find max abs value and compute scale
+        float amax = 0.0f;
+        for (int i = 0; i < 32; ++i) {
+            float abs_v = std::abs(s[i]);
+            if (abs_v > amax) amax = abs_v;
+        }
+        float d = amax / 7.0f;  // 4-bit signed: [-8, 7]
+        uint16_t dh = f32_to_fp16(d);
+        std::memcpy(blk, &dh, 2);
+        // Q4_0 has no independent offset (m = -d * 0 effectively)
+        // So we set offset to -8*d which means m = 0
+        float m = 0.0f;
+        uint16_t mh = f32_to_fp16(m);
+        std::memcpy(blk + 2, &mh, 2);
+
+        // Pack 4-bit values
+        if (d > 0.0f) {
+            float id = 1.0f / d;
+            for (int i = 0; i < 16; ++i) {
+                int8_t lo = static_cast<int8_t>(nearbyintf(s[2 * i]     * id) + 8);
+                int8_t hi = static_cast<int8_t>(nearbyintf(s[2 * i + 1] * id) + 8);
+                lo = std::max(int8_t(0), std::min(int8_t(15), lo));
+                hi = std::max(int8_t(0), std::min(int8_t(15), hi));
+                blk[4 + i] = static_cast<uint8_t>(lo) | (static_cast<uint8_t>(hi) << 4);
+            }
+        } else {
+            std::memset(blk + 4, 0x88, 16);
+        }
+    }
+}
+
+// ─── Quantization: F32 → Q8_0 ─────────────────────────────────
+
+void quantize_q8_0(const float* src, uint8_t* out, int n_blocks) {
+    // Q8_0: [d: fp16][32 bytes int8 weights] = 34 bytes, 32 elements per block
+    for (int b = 0; b < n_blocks; ++b) {
+        const float* s = src + b * 32;
+        uint8_t* blk  = out + b * 34;
+
+        float amax = 0.0f;
+        for (int i = 0; i < 32; ++i) {
+            float abs_v = std::abs(s[i]);
+            if (abs_v > amax) amax = abs_v;
+        }
+        float d = amax / 127.0f;  // 8-bit signed: [-128, 127]
+        uint16_t dh = f32_to_fp16(d);
+        std::memcpy(blk, &dh, 2);
+
+        if (d > 0.0f) {
+            float id = 1.0f / d;
+            int8_t* w = reinterpret_cast<int8_t*>(blk + 2);
+            for (int i = 0; i < 32; ++i) {
+                w[i] = static_cast<int8_t>(std::max(-128.0f, std::min(127.0f, nearbyintf(s[i] * id))));
+            }
+        } else {
+            std::memset(blk + 2, 0, 32);
+        }
+    }
+}
 
 // Block byte sizes for quantization types
 static inline int quant_block_bytes(int qtype) {
@@ -537,7 +693,6 @@ void matvec_dequant(const uint8_t* A_q, const float* x, float* y,
         float dot = 0.0f;
         for (int bi = 0; bi < n_blocks_per_row; ++bi) {
             const uint8_t* blk = A_q + (m * n_blocks_per_row + bi) * bpb;
-            float vals[256];  // max block size is 256 for K-quants
             int x_start = bi * blck;
             int x_len = std::min(blck, N - x_start);
 

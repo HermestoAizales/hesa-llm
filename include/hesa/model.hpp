@@ -37,6 +37,14 @@ struct ModelMetadata {
     bool engram_enabled = false;
 
     std::unordered_map<std::string, std::variant<std::string, int64_t, double, bool>> custom;
+
+    // Tokenizer data from GGUF arrays (populated during Model::load)
+    std::vector<std::string> vocab;          // tokenizer.ggml.tokens
+    std::vector<float> vocab_scores;         // tokenizer.ggml.scores
+    std::vector<int32_t> token_types;        // tokenizer.ggml.token_type
+    std::vector<std::string> merges;         // tokenizer.ggml.merges
+
+    bool has_tokenizer_data() const { return !vocab.empty(); }
 };
 
 /**

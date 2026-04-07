@@ -28,18 +28,18 @@ Result<std::unique_ptr<Backend>> create_backend(BackendType type, DeviceConfig c
         case BackendType::CPU_X86:
         case BackendType::CPU_ARM: {
             auto be = std::make_unique<class CPU_Backend>(cfg);
-            return std::move(be);
+            return be;
         }
 #ifdef HESA_HAS_CUDA
         case BackendType::CUDA: {
             auto be = std::make_unique<class CudaBackend>(cfg);
-            return std::move(be);
+            return be;
         }
 #endif
 #ifdef HESA_HAS_METAL
         case BackendType::METAL: {
             auto be = std::make_unique<class MetalBackend>(cfg);
-            return std::move(be);
+            return be;
         }
 #endif
         default:

@@ -55,6 +55,25 @@ Result<std::unique_ptr<Tokenizer>> create_bpe_tokenizer(
     std::vector<std::pair<std::string, std::string>> merges,
     int32_t bos_id, int32_t eos_id);
 
+/**
+ * Create a SentencePiece tokenizer from GGUF-extracted vocab data.
+ * @param tokens array of token strings (tokenizer.ggml.tokens)
+ * @param scores log-probabilities for unigram, or merge ranks for BPE
+ * @param token_types GGUF token types (1=normal, 2=unknown, 3=control, 4=unused, 5=byte, 6=byte)
+ * @param merges BPE merge rules (tokenizer.ggml.merges), empty for unigram
+ * @param model_type "unigram" or "bpe"
+ * @param bos_id bos token id
+ * @param eos_id eos token id
+ * @param unk_id unknown token id (-1 if none)
+ */
+Result<std::unique_ptr<Tokenizer>> create_sp_tokenizer(
+    std::vector<std::string> tokens,
+    std::vector<float> scores,
+    std::vector<int32_t> token_types,
+    std::vector<std::string> merges,
+    const std::string& model_type,
+    int32_t bos_id, int32_t eos_id, int32_t unk_id = -1);
+
 } // namespace hesa
 
 #endif // HESA_TOKENIZER_HPP

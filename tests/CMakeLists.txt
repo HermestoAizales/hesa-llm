@@ -31,3 +31,10 @@ add_executable(test_sampling_full
 )
 target_link_libraries(test_sampling_full PRIVATE hesa_core)
 add_test(NAME hesa_sampling_full COMMAND test_sampling_full)
+
+# Tokenizer tests
+add_executable(test_sp_tokenizer
+    test_sp_tokenizer.cpp
+)
+target_link_libraries(test_sp_tokenizer PRIVATE hesa_core)
+add_test(NAME hesa_sp_tokenizer COMMAND test_sp_tokenizer)

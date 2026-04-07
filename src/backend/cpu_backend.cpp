@@ -12,7 +12,7 @@
 #endif
 
 // -- Fallback: detect SIMD at compile time on x86 --
-#if !defined(__AVX__) && !defined(__ARM_NEON)
+#if !defined(__AVX__) && !defined(__AVX2__)
 #define HESA_CPU_SCALAR 1
 #endif
 
@@ -24,7 +24,7 @@ namespace hesa {
 
 void cpu_matmul_f32(const float* a, const float* b, float* out,
                     int M, int N, int K, float scale) {
-#if HESA_CPU_SCALAR || 1
+#if HESA_CPU_SCALAR
     // Scalar reference:  C = scale * A @ B
     // A: [M x K], B: [K x N], C: [M x N]
     for (int i = 0; i < M; ++i) {
@@ -136,7 +136,7 @@ Result<Tensor> CPU_Backend::alloc_tensor(Dtype dtype, std::span<const int64_t> s
     Tensor t(dtype, shape, this);
     if (t.nelements() == 0)
         return make_error<Tensor>(Error::INVALID_ARGUMENT);
-    return std::move(t);
+    return t;
 }
 
 Result<void> CPU_Backend::free_tensor(Tensor& tensor) {

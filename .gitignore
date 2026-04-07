@@ -43,3 +43,5 @@ _deps/
 # Release archives
 *.tar.gz
 *.zip
+*.gguf
+build_*/

@@ -52,6 +52,11 @@ public:
     uint64_t file_size() const { return file_size_; }
     uint64_t data_offset() const { return data_offset_; }
 
+    // Array-type metadata accessors (for tokenizer data)
+    const std::unordered_map<std::string, std::vector<std::string>>& string_arrays() const { return string_arrays_; }
+    const std::unordered_map<std::string, std::vector<float>>& float_arrays() const { return float_arrays_; }
+    const std::unordered_map<std::string, std::vector<int32_t>>& int_arrays() const { return int_arrays_; }
+
     // Release ownership of the mmap (used when transferring to Model)
     void release();
 
@@ -70,6 +75,9 @@ private:
 
     // Raw metadata (before extraction into ModelMetadata)
     std::unordered_map<std::string, std::variant<std::string, int64_t, double, bool>> meta_custom_;
+    std::unordered_map<std::string, std::vector<std::string>> string_arrays_;
+    std::unordered_map<std::string, std::vector<float>> float_arrays_;
+    std::unordered_map<std::string, std::vector<int32_t>> int_arrays_;
     std::vector<TensorInfo> tensor_infos_;
 };
 

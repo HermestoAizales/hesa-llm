@@ -79,8 +79,8 @@ struct Tensor::Impl {
 Tensor::Tensor() : impl_(std::make_unique<Impl>()) {}
 
 Tensor::Tensor(Dtype dtype, std::span<const int64_t> shape, Backend* backend)
-    : dtype_(dtype), shape_(shape), backend_(backend),
-      impl_(std::make_unique<Impl>())
+    : dtype_(dtype), shape_(shape), impl_(std::make_unique<Impl>()),
+      backend_(backend)
 {
     size_t n = shape_.nelements();
     impl_->host_data.resize(n * dtype_size(dtype_));
@@ -94,7 +94,7 @@ Tensor::~Tensor() = default;
 
 Tensor::Tensor(Tensor&& other) noexcept
     : dtype_(other.dtype_), shape_(other.shape_),
-      backend_(other.backend_), impl_(std::move(other.impl_)),
+      impl_(std::move(other.impl_)), backend_(other.backend_),
       name_(std::move(other.name_)) {
     other.backend_ = nullptr;
 }

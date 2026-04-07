@@ -181,17 +181,52 @@ Result<void> GGUFReader::read_metadata() {
             case 9: { // ARRAY
                 int32_t arr_type = read_val<int32_t>(data_ + off); off += 4;
                 uint64_t arr_len = read_val<uint64_t>(data_ + off); off += 8;
-                if (arr_type == 8) {
+                if (arr_type == 8) { // STRING array
+                    auto& arr = string_arrays_[key];
+                    arr.reserve(static_cast<size_t>(arr_len));
                     for (uint64_t j = 0; j < arr_len; ++j)
-                        read_string(data_ + off, off);
-                } else if (arr_type == 6) {
-                    off += arr_len * 4;
-                } else if (arr_type == 12) {
-                    off += arr_len * 8;
-                } else if (arr_type <= 7) {
-                    off += arr_len * 4;
+                        arr.push_back(read_string(data_ + off, off));
+                } else if (arr_type == 6) { // FLOAT32 array
+                    auto& arr = float_arrays_[key];
+                    arr.reserve(static_cast<size_t>(arr_len));
+                    for (uint64_t j = 0; j < arr_len; ++j) {
+                        arr.push_back(read_val<float>(data_ + off));
+                        off += 4;
+                    }
+                } else if (arr_type == 12) { // FLOAT64 array
+                    auto& arr = float_arrays_[key];
+                    arr.reserve(static_cast<size_t>(arr_len));
+                    for (uint64_t j = 0; j < arr_len; ++j) {
+                        arr.push_back(static_cast<float>(read_val<double>(data_ + off)));
+                        off += 8;
+                    }
+                } else if (arr_type == 5) { // INT32 array
+                    auto& arr = int_arrays_[key];
+                    arr.reserve(static_cast<size_t>(arr_len));
+                    for (uint64_t j = 0; j < arr_len; ++j) {
+                        arr.push_back(read_val<int32_t>(data_ + off));
+                        off += 4;
+                    }
+                } else if (arr_type == 10) { // UINT64 array
+                    auto& arr = int_arrays_[key];
+                    arr.reserve(static_cast<size_t>(arr_len));
+                    for (uint64_t j = 0; j < arr_len; ++j) {
+                        uint64_t v = read_val<uint64_t>(data_ + off); off += 8;
+                        arr.push_back(v > static_cast<uint64_t>(INT32_MAX) ? INT32_MAX : static_cast<int32_t>(v));
+                    }
+                } else if (arr_type == 11) { // INT64 array
+                    auto& arr = int_arrays_[key];
+                    arr.reserve(static_cast<size_t>(arr_len));
+                    for (uint64_t j = 0; j < arr_len; ++j) {
+                        int64_t v = read_val<int64_t>(data_ + off); off += 8;
+                        if (v > INT32_MAX) v = INT32_MAX;
+                        else if (v < INT32_MIN) v = INT32_MIN;
+                        arr.push_back(static_cast<int32_t>(v));
+                    }
                 } else {
-                    off += arr_len * 8;
+                    // Fallback: skip remaining bytes
+                    if (arr_type <= 7) off += arr_len * 4;
+                    else off += arr_len * 8;
                 }
                 break;
             }
@@ -301,6 +336,25 @@ Result<std::unique_ptr<Model>> Model::load(const std::string& path, Backend* bac
     meta.use_ttt = bool_val("hesa.use_ttt");
     meta.use_hyper_connections = bool_val("hesa.use_hyper_connections");
     meta.engram_enabled = bool_val("hesa.engram_enabled");
+
+    // ─── Extract tokenizer arrays from GGUF (now stored by the loader!) ────
+    auto sa_it = reader.string_arrays().find("tokenizer.ggml.tokens");
+    if (sa_it != reader.string_arrays().end()) {
+        meta.vocab = sa_it->second;
+    }
+    auto sa_merges = reader.string_arrays().find("tokenizer.ggml.merges");
+    if (sa_merges != reader.string_arrays().end()) {
+        meta.merges = sa_merges->second;
+    }
+    auto fa_scores = reader.float_arrays().find("tokenizer.ggml.scores");
+    if (fa_scores != reader.float_arrays().end()) {
+        meta.vocab_scores = fa_scores->second;
+    }
+    auto ia_types = reader.int_arrays().find("tokenizer.ggml.token_type");
+    if (ia_types != reader.int_arrays().end()) {
+        meta.token_types = ia_types->second;
+    }
+
     model->metadata_ = meta;
 
     // Transfer mmap to model or open a fresh one
@@ -353,7 +407,8 @@ Result<std::unique_ptr<Model>> Model::load(const std::string& path, Backend* bac
         } else {
             size_t packed_size = gguf_type_size(ti.dtype, static_cast<size_t>(nelem));
             t = Tensor(dtype, shape_reversed, backend);
-            std::memcpy(t.data(), weight_data, std::min(packed_size, t.nbytes()));
+            // For quantized types, the tensor may be padded — copy the full packed data
+            std::memcpy(t.data(), weight_data, packed_size);
         }
         t.set_name(ti.name);
         model->tensors_[ti.name] = std::move(t);

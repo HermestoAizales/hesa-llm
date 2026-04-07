@@ -4,6 +4,7 @@
 #include "hesa/model.hpp"
 #include "hesa/result.hpp"
 #include "hesa/tensor.hpp"
+#include "hesa/simd.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -28,6 +29,121 @@ std::string layer_prefix(int layer, const std::string& arch) {
 static const Tensor* get_tensor_safe(const Model& model, const std::string& name) {
     auto r = model.get_tensor(name);
     return r ? *r : nullptr;
+}
+
+/* ==========================================================================
+ *  Helper: map hesa::Dtype to GGML qtype code used by simd::matvec_dequant
+ * ========================================================================== */
+static int dtype_to_qtype(Dtype dt) {
+    switch (dt) {
+        case Dtype::Q4_0:  return 2;
+        case Dtype::Q4_1:  return 3;
+        case Dtype::Q5_0:  return 6;
+        case Dtype::Q5_1:  return 7;
+        case Dtype::Q8_0:  return 8;
+        case Dtype::Q2_K:  return 10;
+        case Dtype::Q3_K:  return 11;
+        case Dtype::Q4_K:  return 12;
+        case Dtype::Q5_K:  return 13;
+        case Dtype::Q6_K:  return 14;
+        default:           return -1; // non-quantized
+    }
+}
+
+/* ==========================================================================
+ *  quantized_matvec
+ *
+ *  Matrix-vector multiply: out[m] += sum_n(w[m, n] * x[n])
+ *
+ *  The weight tensor is [M, N] stored row-major in quantized format.
+ *  x is [N] (float).  out is [M] (float), accumulated.
+ *
+ *  Dispatcher:
+ *    - Q4_0 / Q8_0 → simd::matvec_dequant
+ *    - Q4_K / Q5_K / Q6_K → simd::matvec_dequant
+ *    - F16 / BF16 → on-the-fly fp16 dequant
+ *    - F32 → SIMD dot-product / naive loop
+ *  ========================================================================== */
+
+static void quantized_matvec_2d(const Tensor& weight, const float* x, float* out,
+                                 int M, int N) {
+    // weight shape is [M, N] in C-contiguous (row-major) layout
+    Dtype dt = weight.dtype();
+    const void* wdata = weight.data();
+
+    // ── Q4_0, Q5_0, Q5_1, Q8_0 → matvec_dequant ──────────────────
+    int qtype = dtype_to_qtype(dt);
+    if (qtype >= 0) {
+        const uint8_t* wu8 = static_cast<const uint8_t*>(wdata);
+        simd::matvec_dequant(wu8, x, out, M, N, 0, qtype);
+        return;
+    }
+
+    // ── F16 → on-the-fly dequant ──────────────────────────────────
+    if (dt == Dtype::F16) {
+        const uint16_t* wh = static_cast<const uint16_t*>(wdata);
+        for (int m = 0; m < M; ++m) {
+            float dot = 0.0f;
+            for (int n = 0; n < N; ++n) {
+                float wf = simd::fp16_to_f32(wh[m * N + n]);
+                dot += wf * x[n];
+            }
+            out[m] += dot;
+        }
+        return;
+    }
+
+    // ── BF16 → on-the-fly dequant ─────────────────────────────────
+    if (dt == Dtype::BF16) {
+        const uint16_t* wh = static_cast<const uint16_t*>(wdata);
+        for (int m = 0; m < M; ++m) {
+            float dot = 0.0f;
+            for (int n = 0; n < N; ++n) {
+                // BF16: just zero-extend the lower 16 bits
+                uint32_t bits = static_cast<uint32_t>(wh[m * N + n]) << 16;
+                float wf;
+                std::memcpy(&wf, &bits, 4);
+                dot += wf * x[n];
+            }
+            out[m] += dot;
+        }
+        return;
+    }
+
+    // ── F32 → SIMD matvec ─────────────────────────────────────────
+    if (dt == Dtype::F32) {
+        const float* wf = static_cast<const float*>(wdata);
+        for (int m = 0; m < M; ++m) {
+            // Use SIMD dot product
+            float dot = simd::dot_f32(wf + m * N, x, N);
+            out[m] += dot;
+        }
+        return;
+    }
+
+    // ── I8 (linear) ───────────────────────────────────────────────
+    if (dt == Dtype::I8) {
+        const int8_t* wi8 = static_cast<const int8_t*>(wdata);
+        for (int m = 0; m < M; ++m) {
+            float dot = 0.0f;
+            for (int n = 0; n < N; ++n) {
+                dot += static_cast<float>(wi8[m * N + n]) * x[n];
+            }
+            out[m] += dot;
+        }
+        return;
+    }
+
+    // ── Fallback: treat as F32 (with warning) ─────────────────────
+    fprintf(stderr, "[quantized_matvec] Unknown dtype %s, treating as F32\n",
+            dtype_name(dt));
+    const float* wf = static_cast<const float*>(wdata);
+    if (wf) {
+        for (int m = 0; m < M; ++m) {
+            float dot = simd::dot_f32(wf + m * N, x, N);
+            out[m] += dot;
+        }
+    }
 }
 
 /* ==========================================================================
@@ -111,36 +227,20 @@ Result<void> transformer_layer_forward(
     size_t q_proj_dim = n_query_heads * head_dim;
     size_t k_proj_dim = n_kv_heads * head_dim;
 
-    const float* wq_d = static_cast<const float*>(wq->data());
-    const float* wk_d = static_cast<const float*>(wk->data());
-    const float* wv_d = static_cast<const float*>(wv->data());
+    // Q = Wq @ attn_in   — uses quantized_matvec if weights are quantized
+    std::vector<float> q_vec(q_proj_dim, 0.0f);
+    quantized_matvec_2d(*wq, attn_in, q_vec.data(),
+                        static_cast<int>(q_proj_dim), static_cast<int>(hidden_dim));
 
-    // Q = Wq @ attn_in   (Wq stored as [q_proj_dim, hidden])
-    std::vector<float> q_vec(q_proj_dim);
-    for (size_t p = 0; p < q_proj_dim; ++p) {
-        float sum = 0.0f;
-        for (size_t j = 0; j < hidden_dim; ++j)
-            sum += wq_d[p * hidden_dim + j] * attn_in[j];
-        q_vec[p] = sum;
-    }
+    // K = Wk @ attn_in
+    std::vector<float> k_vec(k_proj_dim, 0.0f);
+    quantized_matvec_2d(*wk, attn_in, k_vec.data(),
+                        static_cast<int>(k_proj_dim), static_cast<int>(hidden_dim));
 
-    // K = Wk @ attn_in   (Wk stored as [k_proj_dim, hidden])
-    std::vector<float> k_vec(k_proj_dim);
-    for (size_t p = 0; p < k_proj_dim; ++p) {
-        float sum = 0.0f;
-        for (size_t j = 0; j < hidden_dim; ++j)
-            sum += wk_d[p * hidden_dim + j] * attn_in[j];
-        k_vec[p] = sum;
-    }
-
-    // V = Wv @ attn_in   (Wv stored as [k_proj_dim, hidden])
-    std::vector<float> v_vec(k_proj_dim);
-    for (size_t p = 0; p < k_proj_dim; ++p) {
-        float sum = 0.0f;
-        for (size_t j = 0; j < hidden_dim; ++j)
-            sum += wv_d[p * hidden_dim + j] * attn_in[j];
-        v_vec[p] = sum;
-    }
+    // V = Wv @ attn_in
+    std::vector<float> v_vec(k_proj_dim, 0.0f);
+    quantized_matvec_2d(*wv, attn_in, v_vec.data(),
+                        static_cast<int>(k_proj_dim), static_cast<int>(hidden_dim));
 
     // ─── 3. Split Q into heads and apply RoPE ──────────────────────────────
     float* q_data = static_cast<float*>(buf.q_buf.data());
@@ -294,14 +394,10 @@ Result<void> transformer_layer_forward(
         return make_error<void>(Error::TENSOR_NOT_FOUND);
     }
 
-    const float* wo_d = static_cast<const float*>(wo->data());
     std::vector<float> attn_proj(hidden_dim, 0.0f);
-    for (size_t o = 0; o < hidden_dim; ++o) {
-        float sum = 0.0f;
-        for (size_t h = 0; h < n_query_heads * head_dim; ++h)
-            sum += attn_out[h] * wo_d[h * hidden_dim + o];
-        attn_proj[o] = sum;
-    }
+    quantized_matvec_2d(*wo, attn_out.data(), attn_proj.data(),
+                        static_cast<int>(hidden_dim),
+                        static_cast<int>(n_query_heads * head_dim));
 
     // ─── 8. Residual connection (post-attention) ───────────────────────────
     for (size_t i = 0; i < hidden_dim; ++i)
@@ -335,24 +431,14 @@ Result<void> transformer_layer_forward(
     }
 
     /// gate = fn @ W_gate^T  [ffn_inter]
-    const float* wg_d = static_cast<const float*>(w_gate->data());
-    std::vector<float> gate_v(ffn_inter);
-    for (size_t d = 0; d < ffn_inter; ++d) {
-        float sum = 0.0f;
-        for (size_t j = 0; j < hidden_dim; ++j)
-            sum += fn[j] * wg_d[d * hidden_dim + j];
-        gate_v[d] = sum;
-    }
+    std::vector<float> gate_v(ffn_inter, 0.0f);
+    quantized_matvec_2d(*w_gate, fn, gate_v.data(),
+                        static_cast<int>(ffn_inter), static_cast<int>(hidden_dim));
 
     /// up = fn @ W_up^T  [ffn_inter]
-    const float* wu_d = static_cast<const float*>(w_up->data());
-    std::vector<float> up_v(ffn_inter);
-    for (size_t d = 0; d < ffn_inter; ++d) {
-        float sum = 0.0f;
-        for (size_t j = 0; j < hidden_dim; ++j)
-            sum += fn[j] * wu_d[d * hidden_dim + j];
-        up_v[d] = sum;
-    }
+    std::vector<float> up_v(ffn_inter, 0.0f);
+    quantized_matvec_2d(*w_up, fn, up_v.data(),
+                        static_cast<int>(ffn_inter), static_cast<int>(hidden_dim));
 
     /// SiLU(gate) * up
     for (size_t d = 0; d < ffn_inter; ++d) {
@@ -361,13 +447,11 @@ Result<void> transformer_layer_forward(
     }
 
     /// down = gate_v @ W_down^T  [hidden]
-    const float* wd_d = static_cast<const float*>(w_down->data());
-    for (size_t o = 0; o < hidden_dim; ++o) {
-        float sum = 0.0f;
-        for (size_t d = 0; d < ffn_inter; ++d)
-            sum += gate_v[d] * wd_d[d * hidden_dim + o];
-        hn[o] += sum;  // residual
-    }
+    std::vector<float> down_proj(hidden_dim, 0.0f);
+    quantized_matvec_2d(*w_down, gate_v.data(), down_proj.data(),
+                        static_cast<int>(hidden_dim), static_cast<int>(ffn_inter));
+    for (size_t o = 0; o < hidden_dim; ++o)
+        hn[o] += down_proj[o];  // residual
 
     return ok();
 }

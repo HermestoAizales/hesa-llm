@@ -44,7 +44,7 @@ Result<void> tensor_mul(const Tensor& a, const Tensor& b, Tensor& out) {
     const float* fa = static_cast<const float*>(a.data());
     const float* fb = static_cast<const float*>(b.data());
     float* fo = static_cast<float*>(out.data());
-    for (size_t i = 0; i < a.nelements(); ++i)
+    for (size_t i = 0; i < static_cast<size_t>(a.nelements()); ++i)
         fo[i] = fa[i] * fb[i];
     return ok();
 }
@@ -53,7 +53,8 @@ Result<void> tensor_softmax(const Tensor& in, Tensor& out, int axis = -1) {
     if (in.backend()) {
         return in.backend()->softmax(in.view(), out.view(), axis);
     }
-    size_t n = in.shape()[0] * in.shape()[1];
+    (void)axis;
+    /* size_t n = in.shape()[0] * in.shape()[1]; */
     cpu_softmax_f32(static_cast<const float*>(in.data()),
                     static_cast<float*>(out.data()),
                     in.shape()[0], in.shape()[1]);
