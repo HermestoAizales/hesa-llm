@@ -60,6 +60,10 @@ public:
     // Release ownership of the mmap (used when transferring to Model)
     void release();
 
+    // Transfer ownership of the mmap to the caller.
+    struct MmapHandle;
+    std::unique_ptr<MmapHandle> detach_mmap();
+
 private:
     Result<void> read_header();
     Result<void> read_metadata();

@@ -110,6 +110,11 @@ public:
     Tensor();
     Tensor(Dtype dtype, std::span<const int64_t> shape, Backend* backend = nullptr);
     Tensor(Dtype dtype, Shape shape, Backend* backend = nullptr);
+
+    // Create a Tensor that references external memory (e.g., from an mmap'd file).
+    // The Tensor does NOT own the data and will not free it.
+    static Tensor make_from_external(void* data, Dtype dtype, std::span<const int64_t> shape);
+
     ~Tensor();
 
     Tensor(Tensor&&) noexcept;
@@ -119,6 +124,9 @@ public:
 
     void* data();
     const void* data() const;
+
+    // Set external data pointer (for mmap-backed tensors). Takes ownership of no memory.
+    void set_external_data(void* ptr, size_t byte_size);
 
     Dtype dtype() const { return dtype_; }
     const Shape& shape() const { return shape_; }

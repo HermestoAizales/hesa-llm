@@ -270,9 +270,31 @@ Result<void> GGUFReader::read_tensor_infos() {
 }
 
 void GGUFReader::release() {
+    if (data_ && data_ != MAP_FAILED) munmap(const_cast<uint8_t*>(data_), file_size_);
+    if (fd_ >= 0) ::close(fd_);
     fd_ = -1;
     data_ = nullptr;
     path_.clear();
+    file_size_ = 0;
+}
+
+// Transfer the mmap from the reader to the caller.
+// After this, the reader no longer owns the mmap.
+struct GGUFReader::MmapHandle {
+    int fd = -1;
+    const uint8_t* data = nullptr;
+    uint64_t size = 0;
+};
+
+std::unique_ptr<GGUFReader::MmapHandle> GGUFReader::detach_mmap() {
+    auto handle = std::make_unique<MmapHandle>();
+    handle->fd = fd_;
+    handle->data = data_;
+    handle->size = file_size_;
+    fd_ = -1;
+    data_ = nullptr;
+    file_size_ = 0;
+    return handle;
 }
 
 // ─── Model::load ───
@@ -357,19 +379,17 @@ Result<std::unique_ptr<Model>> Model::load(const std::string& path, Backend* bac
 
     model->metadata_ = meta;
 
-    // Transfer mmap to model or open a fresh one
-    model->mapped_file_ = std::make_unique<Model::MappedFile>();
-    model->mapped_file_->size = reader.file_size();
-    model->mapped_file_->fd = open(path.c_str(), O_RDONLY);
-    if (model->mapped_file_->fd >= 0) {
-        model->mapped_file_->data = static_cast<uint8_t*>(
-            mmap(nullptr, model->mapped_file_->size, PROT_READ, MAP_PRIVATE,
-                 model->mapped_file_->fd, 0));
+    // Detach the reader's mmap and transfer ownership to the Model.
+    // This avoids a second mmap of the same file.
+    auto mmap_handle = reader.detach_mmap();
+    if (mmap_handle->data && mmap_handle->data != MAP_FAILED) {
+        model->mapped_file_ = std::make_unique<Model::MappedFile>();
+        model->mapped_file_->fd = mmap_handle->fd;
+        model->mapped_file_->data = const_cast<uint8_t*>(mmap_handle->data);
+        model->mapped_file_->size = mmap_handle->size;
     }
-    // Release reader so it doesn't unmap
-    reader.release();
 
-    const uint8_t* base = model->mapped_file_->data ? model->mapped_file_->data : reader.data_ptr();
+    const uint8_t* base = const_cast<const uint8_t*>(mmap_handle->data);
     const uint8_t* data_start = base + reader.data_offset();
 
     for (const auto& ti : reader.tensors()) {
@@ -383,9 +403,10 @@ Result<std::unique_ptr<Model>> Model::load(const std::string& path, Backend* bac
 
         Tensor t;
         if (dtype == Dtype::F32) {
-            t = Tensor(dtype, shape_reversed, backend);
-            std::memcpy(t.data(), weight_data, t.nbytes());
+            // Zero-copy: tensor data points directly into the mmap'd region
+            t = Tensor::make_from_external(const_cast<uint8_t*>(weight_data), dtype, shape_reversed);
         } else if (dtype == Dtype::F16 || dtype == Dtype::BF16) {
+            // Need to convert F16/BF16 -> F32, so allocate new memory
             t = Tensor(Dtype::F32, shape_reversed, backend);
             const uint16_t* src = reinterpret_cast<const uint16_t*>(weight_data);
             float* dst = static_cast<float*>(t.data());
@@ -405,10 +426,9 @@ Result<std::unique_ptr<Model>> Model::load(const std::string& path, Backend* bac
                 std::memcpy(&dst[i], &f32_bits, sizeof(float));
             }
         } else {
-            size_t packed_size = gguf_type_size(ti.dtype, static_cast<size_t>(nelem));
-            t = Tensor(dtype, shape_reversed, backend);
-            // For quantized types, the tensor may be padded — copy the full packed data
-            std::memcpy(t.data(), weight_data, packed_size);
+            // Zero-copy for quantized types: reference mmap directly
+            (void)nelem; // shape already encodes element count
+            t = Tensor::make_from_external(const_cast<uint8_t*>(weight_data), dtype, shape_reversed);
         }
         t.set_name(ti.name);
         model->tensors_[ti.name] = std::move(t);

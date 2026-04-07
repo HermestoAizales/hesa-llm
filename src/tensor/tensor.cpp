@@ -65,8 +65,17 @@ struct Tensor::Impl {
     size_t byte_strides[Shape::MAX_DIMS] = {0, 0, 0, 0};
     bool owns_data = true;
 
+    // For external/mmap-backed data
+    void* external_data_ptr = nullptr;
+    size_t external_data_size = 0;
+
     // For backend-managed tensors
     void* device_ptr = nullptr;
+
+    void* data_ptr() const {
+        if (!owns_data && external_data_ptr) return external_data_ptr;
+        return const_cast<uint8_t*>(host_data.data());
+    }
 
     void compute_strides(const Shape& s, Dtype dt) {
         byte_strides[s.ndim - 1] = dtype_size(dt);
@@ -90,6 +99,25 @@ Tensor::Tensor(Dtype dtype, std::span<const int64_t> shape, Backend* backend)
 Tensor::Tensor(Dtype dtype, Shape shape, Backend* backend)
     : Tensor(dtype, std::span<const int64_t>(shape.data, shape.ndim), backend) {}
 
+Tensor Tensor::make_from_external(void* data, Dtype dtype, std::span<const int64_t> shape) {
+    Tensor t;
+    t.dtype_ = dtype;
+    t.shape_ = Shape(shape);
+    t.impl_->owns_data = false;
+    t.impl_->external_data_ptr = data;
+    t.impl_->external_data_size = t.nelements() * dtype_size(dtype);
+    t.impl_->compute_strides(t.shape_, dtype);
+    return t;
+}
+
+void Tensor::set_external_data(void* ptr, size_t byte_size) {
+    impl_->host_data.clear();
+    impl_->host_data.shrink_to_fit();
+    impl_->owns_data = false;
+    impl_->external_data_ptr = ptr;
+    impl_->external_data_size = byte_size;
+}
+
 Tensor::~Tensor() = default;
 
 Tensor::Tensor(Tensor&& other) noexcept
@@ -111,8 +139,12 @@ Tensor& Tensor::operator=(Tensor&& other) noexcept {
     return *this;
 }
 
-void* Tensor::data() { return impl_->host_data.data(); }
-const void* Tensor::data() const { return impl_->host_data.data(); }
+void* Tensor::data() {
+    return impl_->data_ptr();
+}
+const void* Tensor::data() const {
+    return impl_->data_ptr();
+}
 
 size_t Tensor::byte_stride(int axis) const {
     if (axis < 0 || axis >= static_cast<int>(shape_.ndim)) return 0;
@@ -148,7 +180,7 @@ size_t TensorView::nbytes() const {
 }
 
 TensorView Tensor::view() const {
-    return TensorView(impl_->host_data.data(), dtype_, shape_,
+    return TensorView(impl_->data_ptr(), dtype_, shape_,
                       std::span<const size_t>(impl_->byte_strides, shape_.ndim));
 }
 
@@ -164,7 +196,7 @@ TensorView Tensor::reshape(std::span<const int64_t> new_shape) const {
     strides[ns.ndim - 1] = dtype_size(dtype_);
     for (int i = static_cast<int>(ns.ndim) - 2; i >= 0; --i)
         strides[i] = strides[i + 1] * ns[i];
-    return TensorView(impl_->host_data.data(), dtype_, ns,
+    return TensorView(impl_->data_ptr(), dtype_, ns,
                       std::span<const size_t>(strides, ns.ndim));
 }
 
@@ -174,7 +206,7 @@ TensorView Tensor::transpose(int ax0, int ax1) const {
     size_t strides[Shape::MAX_DIMS];
     std::memcpy(strides, impl_->byte_strides, sizeof(strides));
     std::swap(strides[ax0], strides[ax1]);
-    return TensorView(impl_->host_data.data(), dtype_, ns,
+    return TensorView(impl_->data_ptr(), dtype_, ns,
                       std::span<const size_t>(strides, shape_.ndim));
 }
 
@@ -187,7 +219,7 @@ TensorView Tensor::select(int axis, int64_t index) const {
         ns.data[i] = ns.data[i + 1];
     ns.ndim--;
     // Advance data pointer
-    uint8_t* ptr = static_cast<uint8_t*>(impl_->host_data.data());
+    uint8_t* ptr = static_cast<uint8_t*>(impl_->data_ptr());
     ptr += impl_->byte_strides[axis] * index;
     return TensorView(ptr, dtype_, ns);
 }
