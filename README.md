@@ -51,7 +51,7 @@ cmake --build build -j$(nproc)
 
 | Component | Status |
 |-----------|--------|
-| GGUF v3 Loader | Complete -- all metadata types, tensor info, mmap loading |
+|| GGUF v3 Loader | Complete -- all metadata types, tensor info, mmap loading; reverses tensor dims to match internal layout convention |
 | Tensor + Views | Complete -- F32/F16/BF16 + all GGML quant types |
 | SIMD Kernels | Complete -- NEON + AVX2/AVX512 dispatch |
 | Dequant + Matvec | Complete -- Q4_0/5_0/8_0, Q4_K/5_K/6_K; Q5_0 scaling fixed (NaN issue resolved) |

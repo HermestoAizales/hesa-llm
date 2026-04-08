@@ -642,6 +642,8 @@ Key design: HESF files are valid GGUF files (magic number `GGUF`), with custom m
 └─────────────────────────────────────────────────────────────┘
 ```
 
+**Note on tensor dimension order:** GGUF files store tensor dimensions in reversed order relative to HESA's internal row-major convention (e.g., `[hidden, vocab]` instead of `[vocab, hidden]`). The loader reverses the `dimensions[]` array on read so that weight matrices have the correct `[M, N]` orientation for `matmul(W, x)`. This is transparent to the engine but important for understanding tensor shapes observed during debugging.
+
 ### 4.3 Quantization Support
 
 HESF supports all standard GGUF quantization types plus two new modes:
