@@ -46,6 +46,8 @@ Result<std::unique_ptr<Engine>> Engine::create(const std::string& model_path,
             meta.architecture.empty() ? "?" : meta.architecture.c_str(),
             meta.vocab_size, meta.block_count, meta.embedding_length);
 
+
+
     // Get hyper-parameters
     size_t hidden_dim = meta.embedding_length;
     if (hidden_dim == 0) hidden_dim = 256;
@@ -171,8 +173,9 @@ Result<void> Engine::forward_single_token(int32_t token_id,
     if (static_cast<size_t>(token_id) >= emb_vocab) {
         return make_error<void>(Error::INVALID_ARGUMENT);
     }
-    if (out_hidden.size() < emb_hidden)
+    if (out_hidden.size() < emb_hidden) {
         return make_error<void>(Error::INVALID_ARGUMENT);
+    }
 
     if (edt == Dtype::F32) {
         const float* edata = static_cast<const float*>(emb->data());
