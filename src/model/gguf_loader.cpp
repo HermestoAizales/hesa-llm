@@ -4,6 +4,7 @@
 #include "hesa/result.hpp"
 #include "hesa/tensor.hpp"
 
+#include <algorithm>
 #include <cstring>
 #include <sys/mman.h>
 
@@ -254,6 +255,10 @@ Result<void> GGUFReader::read_tensor_infos() {
         for (uint32_t d = 0; d < n_dims && off + 8 <= file_size_; ++d) {
             info.dims[d] = read_val<int64_t>(data_ + off); off += 8;
         }
+        // GGUF files often store tensor dims in reverse order relative to
+        // our internal convention (e.g., [hidden, vocab] instead of [vocab, hidden]).
+        // Reverse to match engine expectations.
+        std::reverse(info.dims.begin(), info.dims.end());
 
         if (off + 8 > file_size_) break;
         int32_t dtype_raw = read_val<int32_t>(data_ + off); off += 4;
