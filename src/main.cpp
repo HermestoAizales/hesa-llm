@@ -159,7 +159,9 @@ int main(int argc, char* argv[]) {
     );
 
     if (!gen_result) {
-        std::fprintf(stderr, "\nError: Generation failed.\n");
+        std::fprintf(stderr, "\nError: Generation failed. Code=%d (%s)\n",
+                     static_cast<int>(gen_result.error().value()),
+                     gen_result.error().message().c_str());
         return 1;
     }
 

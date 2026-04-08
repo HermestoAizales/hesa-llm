@@ -470,10 +470,18 @@ Result<std::unique_ptr<Model>> Model::load(const std::string& path, Backend* bac
                 }
                 std::memcpy(&dst[i], &f32_bits, sizeof(float));
             }
-        } else {
-            // Zero-copy for quantized types: reference mmap directly
+        } else if (dtype == Dtype::Q4_0 || dtype == Dtype::Q4_1 ||
+                   dtype == Dtype::Q5_0 || dtype == Dtype::Q5_1 ||
+                   dtype == Dtype::Q8_0 || dtype == Dtype::Q2_K ||
+                   dtype == Dtype::Q3_K || dtype == Dtype::Q4_K ||
+                   dtype == Dtype::Q5_K || dtype == Dtype::Q6_K) {
+            // Zero-copy for all quantized types: reference mmap directly
             (void)nelem; // shape already encodes element count
             t = Tensor::make_from_external(const_cast<uint8_t*>(weight_data), dtype, shape);
+        } else {
+            fprintf(stderr, "[gguf_loader] Warning: unknown dtype %%d for tensor %%s, treating as F32\n",
+                    static_cast<int>(dtype), ti.name.c_str());
+            t = Tensor::make_from_external(const_cast<uint8_t*>(weight_data), Dtype::F32, shape);
         }
         t.set_name(ti.name);
         model->tensors_[ti.name] = std::move(t);

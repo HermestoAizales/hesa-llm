@@ -48,6 +48,8 @@ public:
 
     const std::vector<TensorInfo>& tensors() const { return tensor_infos_; }
 
+    int count_layers() const;
+
     const uint8_t* data_ptr() const { return data_; }
     uint64_t file_size() const { return file_size_; }
     uint64_t data_offset() const { return data_offset_; }

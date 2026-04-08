@@ -152,9 +152,23 @@ public:
             if (t.size() > max_token_length_) max_token_length_ = t.size();
 
         // Extract byte tokens for fallback (type 5 = byte)
+        // FIX (Apr 2026): The original code used `{i / 256, i % 256}` which is NONSENSE —
+        // i is the token ID, not a byte value.  We must parse the actual byte from the
+        // token string format "<0xHH>" (GGUF SentencePiece byte tokens) and map
+        // (byte_value → token_id) for O(1) lookup during encoding.
         for (int32_t i = 0; i < static_cast<int32_t>(token_types_.size()); ++i) {
             if (token_types_[i] == SPTokenType::BYTE && !tokens_[i].empty()) {
-                byte_token_map_.push_back({static_cast<uint8_t>(i / 256), static_cast<uint8_t>(i % 256)});
+                uint8_t byte = 0;
+                const auto& tok = tokens_[i];
+                // Parse "<0xHH>" → hex value
+                if (tok.size() == 6 && tok[0] == '<' && tok[1] == '0' && tok[2] == 'x' && tok[5] == '>') {
+                    char hb = tok[3], lb = tok[4];
+                    byte = static_cast<uint8_t>(hex_byte(hb) * 16 + hex_byte(lb));
+                } else if (tok.size() == 4 && tok[0] == '<' && tok[1] == '0' && tok[2] == 'x' && tok[3] == '>') {
+                    // Edge case: just "<0x>" — treat as 0
+                    byte = 0;
+                }
+                byte_token_map_.push_back({byte, static_cast<uint8_t>(i)});
             }
         }
 

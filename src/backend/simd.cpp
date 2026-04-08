@@ -662,7 +662,6 @@ void quantize_q8_0(const float* src, uint8_t* out, int n_blocks) {
     }
 }
 
-// Block byte sizes for quantization types
 static inline int quant_block_bytes(int qtype) {
     switch (qtype) {
         case 2:  return 18;   // Q4_0
@@ -673,6 +672,7 @@ static inline int quant_block_bytes(int qtype) {
         case 12: return 144;  // Q4_K
         case 13: return 176;  // Q5_K
         case 14: return 210;  // Q6_K
+        case 15: return 112;  // Q3_K (3.5 bits/elem → 256*3.5/8=112)
         default: return 32 * 4; // F32 fallback
     }
 }
@@ -680,7 +680,7 @@ static inline int quant_block_bytes(int qtype) {
 static inline int quant_block_size(int qtype) {
     switch (qtype) {
         case 2: case 3: case 6: case 7: case 8: return 32;
-        case 12: case 13: case 14: return 256;
+        case 12: case 13: case 14: case 15: return 256;
         default: return 1;
     }
 }
@@ -843,6 +843,34 @@ void matvec_dequant(const uint8_t* A_q, const float* x, float* y,
                     bql += 64;
                     bqh += 32;
                     bsc += 8;
+                }
+            } else if (qtype == 15) { // Q3_K: [d:2][dmin:2][scales(8*1.5B=12)][qh(32)][ql(64)] = 112B, 256 vals
+                uint16_t _dh3, _dmh3;
+                std::memcpy(&_dh3, blk, 2);
+                std::memcpy(&_dmh3, blk + 2, 2);
+                float d3  = fp16_to_f32(_dh3);
+                float dm3 = fp16_to_f32(_dmh3);
+
+                // Group scales: 8 groups × 6 bits stored in 12 bytes (packed 1.5 B each)
+                // For simplicity treat as 8 uint8_t; upper 2 bits are zero.
+                const uint8_t* sc = blk + 4;
+                uint8_t gs[8];
+                for (int s = 0; s < 8; ++s) gs[s] = sc[s] & 0x3F;
+
+                const uint8_t* qh3 = blk + 16;   // 32 bytes, 2 high bits per val
+                const uint8_t* ql3 = blk + 48;   // 64 bytes, 4 low bits per val
+
+                for (int l = 0; l < 256; ++l) {
+                    int g = l >> 6;               // group 0..3 (64 vals per group)
+                    uint8_t lo4 = ql3[l] & 0xF;   // low 4 bits
+                    int qh_idx  = l >> 2;         // /4
+                    int sh      = (l & 3) * 2;    // bit offset in qh byte
+                    uint8_t hi2 = (qh3[qh_idx] >> sh) & 0x3;
+                    uint8_t q6  = (hi2 << 4) | lo4;   // 6-bit value 0..63
+                    int xi = l;
+                    if (xi >= x_start && xi < x_start + x_len) {
+                        dot += d3 * gs[g] * (static_cast<int>(q6) - 32) * x[xi] + dm3 * x[xi];
+                    }
                 }
             } else {
                 // Fallback: dequantize via dedicated functions or zeros
