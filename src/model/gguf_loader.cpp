@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <iostream>
 #include <sys/mman.h>
 
 namespace hesa {
@@ -240,37 +241,54 @@ Result<void> GGUFReader::read_metadata() {
     return ok();
 }
 
-Result<void> GGUFReader::read_tensor_infos() {
-    uint64_t off = data_offset_;
+    Result<void> GGUFReader::read_tensor_infos() {
+        uint64_t off = data_offset_;
 
-    for (uint64_t i = 0; i < n_tensors_; ++i) {
-        if (off >= file_size_) break;
+        for (uint64_t i = 0; i < n_tensors_; ++i) {
+            if (off >= file_size_) break;
 
-        TensorInfo info;
-        info.name = read_string(data_ + off, off);
-        if (off >= file_size_) break;
+            TensorInfo info;
+            info.name = read_string(data_ + off, off);
+            if (off >= file_size_) break;
 
-        uint32_t n_dims = read_val<uint32_t>(data_ + off); off += 4;
-        info.dims.resize(n_dims);
-        for (uint32_t d = 0; d < n_dims && off + 8 <= file_size_; ++d) {
-            info.dims[d] = read_val<int64_t>(data_ + off); off += 8;
+            uint32_t n_dims = read_val<uint32_t>(data_ + off); off += 4;
+            info.dims.resize(n_dims);
+            for (uint32_t d = 0; d < n_dims && off + 8 <= file_size_; ++d) {
+                info.dims[d] = read_val<int64_t>(data_ + off); off += 8;
+            }
+            // Reverse to match engine expectations.
+            std::reverse(info.dims.begin(), info.dims.end());
+
+            if (off + 8 > file_size_) break;
+            int32_t dtype_raw = read_val<int32_t>(data_ + off); off += 4;
+            info.dtype = static_cast<GGUFType>(dtype_raw);
+            info.offset = read_val<uint64_t>(data_ + off); off += 8;
+
+            tensor_infos_.push_back(std::move(info));
         }
-        // GGUF files often store tensor dims in reverse order relative to
-        // our internal convention (e.g., [hidden, vocab] instead of [vocab, hidden]).
-        // Reverse to match engine expectations.
-        std::reverse(info.dims.begin(), info.dims.end());
 
-        if (off + 8 > file_size_) break;
-        int32_t dtype_raw = read_val<int32_t>(data_ + off); off += 4;
-        info.dtype = static_cast<GGUFType>(dtype_raw);
-        info.offset = read_val<uint64_t>(data_ + off); off += 8;
-
-        tensor_infos_.push_back(std::move(info));
+        data_offset_ = (off + 31) & ~static_cast<uint64_t>(31);
+        return ok();
     }
 
-    data_offset_ = (off + 31) & ~static_cast<uint64_t>(31);
-    return ok();
-}
+    // Count transformer layers from tensor names (e.g. "model.layers.0.attn" or "blk.0.")
+    int GGUFReader::count_layers() const {
+        int max_idx = -1;
+        for (const auto& t : tensor_infos_) {
+            const std::string& name = t.name;
+            size_t pos = name.find("layers.");
+            if (pos == std::string::npos) pos = name.find("blk.");
+            if (pos == std::string::npos) continue;
+            size_t dot = name.find('.', pos + (pos == name.find("layers.") ? 7 : 4));
+            if (dot == std::string::npos) continue;
+            try {
+                int idx = std::stoi(name.substr(pos + (pos == name.find("layers.") ? 7 : 4),
+                                                dot - (pos + (pos == name.find("layers.") ? 7 : 4))));
+                if (idx > max_idx) max_idx = idx;
+            } catch (...) {}
+        }
+        return max_idx >= 0 ? max_idx + 1 : 0;
+    }
 
 void GGUFReader::release() {
     if (data_ && data_ != MAP_FAILED) munmap(const_cast<uint8_t*>(data_), file_size_);
@@ -308,6 +326,13 @@ Result<std::unique_ptr<Model>> Model::load(const std::string& path, Backend* bac
     auto model = std::make_unique<Model>();
     model->path_ = path;
     model->file_size_ = reader.file_size();
+
+    // Auto-detect layer count from tensor names if not present in metadata.
+    int detected_layers = reader.count_layers();
+    if (detected_layers > 0) {
+        model->metadata_.block_count = detected_layers;
+    }
+    // If still 0, we may get block_count from metadata below (general.block_count / arch.block_count).
 
     // Extract metadata into ModelMetadata
     auto meta = model->metadata_;
@@ -455,25 +480,7 @@ Result<std::unique_ptr<Model>> Model::load(const std::string& path, Backend* bac
         model->tensor_names_.push_back(ti.name);
     }
 
-    // Derive block_count (layers) from tensor names if metadata lacks it
-    if (model->metadata_.block_count == 0) {
-        int max_layer = -1;
-        for (const auto& name : model->tensor_names_) {
-            // Expect patterns like "blk.0.", "blk.1.attn_norm.weight", etc.
-            if (name.rfind("blk.", 0) == 0) {
-                size_t dot = name.find('.', 4);
-                if (dot != std::string::npos) {
-                    try {
-                        int layer = std::stoi(name.substr(4, dot - 4));
-                        if (layer > max_layer) max_layer = layer;
-                    } catch (...) { /* ignore malformed */ }
-                }
-            }
-        }
-        if (max_layer >= 0) {
-            model->metadata_.block_count = max_layer + 1;
-        }
-    }
+    // block_count already set via metadata or detected via reader.count_layers() above.
 
     return model;
 }

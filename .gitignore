@@ -45,3 +45,5 @@ _deps/
 *.zip
 *.gguf
 build_*/
+archive_debug/
+
