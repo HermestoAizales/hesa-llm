@@ -350,6 +350,16 @@ Result<std::unique_ptr<Model>> Model::load(const std::string& path, Backend* bac
         meta.attention_layer_norm_rms_epsilon = static_cast<uint32_t>(rms_eps * 1e7f);
         meta.rope_dimension_count = int_val(arch + ".rope.dimension_count");
         meta.rope_freq_base = float_val(arch + ".rope.freq_base", 10000.0f);
+        // Architecture-specific fallbacks if general.* were not found
+        if (meta.vocab_size == 0) {
+            meta.vocab_size = int_val(arch + ".vocab_size");
+        }
+        if (meta.block_count == 0) {
+            meta.block_count = int_val(arch + ".block_count");
+        }
+        if (meta.block_count == 0) {
+            meta.block_count = int_val(arch + ".num_hidden_layers");
+        }
     }
 
     meta.use_neural_memory = bool_val("hesa.use_neural_memory");
@@ -392,8 +402,7 @@ Result<std::unique_ptr<Model>> Model::load(const std::string& path, Backend* bac
         model->mapped_file_->size = mmap_handle->size;
     }
 
-    const uint8_t* base = const_cast<const uint8_t*>(mmap_handle->data);
-    const uint8_t* data_start = base + reader.data_offset();
+    const uint8_t* base = const_cast<uint8_t*>(mmap_handle->data);
 
     for (const auto& ti : reader.tensors()) {
         // Keep shape as stored in GGUF (e.g., [vocab, hidden] for embeddings)
@@ -403,7 +412,9 @@ Result<std::unique_ptr<Model>> Model::load(const std::string& path, Backend* bac
         for (auto d : shape) nelem *= d;
 
         Dtype dtype = gguf_to_hesa_dtype(ti.dtype);
-        const uint8_t* weight_data = data_start + ti.offset;
+        // FIX: ti.offset is an absolute file offset. Previously we added reader.data_offset()
+        // again via data_start, causing double offset -> SIGSEGV on first tensor access.
+        const uint8_t* weight_data = base + ti.offset;
 
         Tensor t;
         if (dtype == Dtype::F32) {
@@ -437,6 +448,26 @@ Result<std::unique_ptr<Model>> Model::load(const std::string& path, Backend* bac
         t.set_name(ti.name);
         model->tensors_[ti.name] = std::move(t);
         model->tensor_names_.push_back(ti.name);
+    }
+
+    // Derive block_count (layers) from tensor names if metadata lacks it
+    if (model->metadata_.block_count == 0) {
+        int max_layer = -1;
+        for (const auto& name : model->tensor_names_) {
+            // Expect patterns like "blk.0.", "blk.1.attn_norm.weight", etc.
+            if (name.rfind("blk.", 0) == 0) {
+                size_t dot = name.find('.', 4);
+                if (dot != std::string::npos) {
+                    try {
+                        int layer = std::stoi(name.substr(4, dot - 4));
+                        if (layer > max_layer) max_layer = layer;
+                    } catch (...) { /* ignore malformed */ }
+                }
+            }
+        }
+        if (max_layer >= 0) {
+            model->metadata_.block_count = max_layer + 1;
+        }
     }
 
     return model;
