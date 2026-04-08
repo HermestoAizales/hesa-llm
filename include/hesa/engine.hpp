@@ -48,6 +48,7 @@ public:
 
     const ModelMetadata& metadata() const { return model_->metadata(); }
     const Model& model() const { return *model_; }
+    Tokenizer* tokenizer() const { return tokenizer_.get(); }
 
     Result<void> forward_single_token(int32_t token_id,
                                       int32_t position,

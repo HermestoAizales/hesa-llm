@@ -35,6 +35,8 @@ struct ModelMetadata {
     bool use_ttt = false;
     bool use_hyper_connections = false;
     bool engram_enabled = false;
+    bool use_speculative = false;      // Medusa speculative decoding
+    int32_t speculative_heads = 0;     // Number of draft heads (e.g., 3 for t+2, t+3, t+4)
 
     std::unordered_map<std::string, std::variant<std::string, int64_t, double, bool>> custom;
 

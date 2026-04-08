@@ -206,6 +206,7 @@ Result<void> transformer_layer_forward(
     // ─── 1. Attention RMSNorm ──────────────────────────────────────────────
     const Tensor* attn_norm_w = get_tensor_safe(model, prefix + "attn_norm.weight");
     if (!attn_norm_w) {
+        fprintf(stderr, "[Layer %d] ERROR: missing tensor: %sattn_norm.weight\\n", layer, prefix.c_str());
         return make_error<void>(Error::TENSOR_NOT_FOUND);
     }
 

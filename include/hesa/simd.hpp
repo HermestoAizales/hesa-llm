@@ -153,6 +153,13 @@ void dequantize_q5_k(const uint8_t* block, float* out, int n_blocks);
  */
 void dequantize_q6_k(const uint8_t* block, float* out, int n_blocks);
 
+/**
+ * Dequantize Q3_K block into 256 float values.
+ * Block layout: [d: fp16][dmin: fp16][scales(12)][weights(96)]
+ *  - 96 weight bytes represent 256 weights at 3 bits each (8 weights per 3 bytes)
+ */
+void dequantize_q3_k(const uint8_t* block, float* out, int n_blocks);
+
 // ─── Quantization ────────────────────────────────────────────────
 
 /**

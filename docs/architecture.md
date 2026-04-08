@@ -1363,6 +1363,8 @@ jobs:
 
 **Key files**: `src/model/quantization.cpp`, `src/backend/cuda_kernels.cu`, `src/backend/metal_kernels.metal`
 
+**Critical bugfix**: Q5_0 dequantization scaling issue. The Q5_0 dequant routine in `src/backend/simd.cpp` used an imprecise scaling factor that produced NaNs in layer outputs starting from the second transformer layer when running SmolLM2 (GGUF v3, Q4_K_M). The scaling calculation was corrected to match the GGUF specification exactly, ensuring numerical stability. This fix was validated by successful end-to-end inference.
+
 ### Phase 3: Neural Memory & TTT (Weeks 13-18)
 
 **Goal**: Implement research-backed features that differentiate HESA.

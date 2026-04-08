@@ -724,6 +724,34 @@ void matvec_dequant(const uint8_t* A_q, const float* x, float* y,
                     int8_t w = blk[2 + k];
                     dot += (d * static_cast<float>(w)) * x[x_start + k];
                 }
+            } else if (qtype == 6) { // Q5_0: [d:2][ql:16][qh:4] = 22 bytes, 32 elements
+                uint16_t dh;
+                std::memcpy(&dh, blk, 2);
+                float d = fp16_to_f32(dh);
+                uint32_t qh_val;
+                std::memcpy(&qh_val, blk + 18, 4);
+                for (int k = 0; k < 16; ++k) {
+                    uint8_t q = blk[2 + k];
+                    int8_t lo = static_cast<int8_t>((q & 0xF) | (((qh_val >> k)     & 1) << 4)) - 16;
+                    int8_t hi = static_cast<int8_t>((q >>  4) | (((qh_val >> (k+16)) & 1) << 4)) - 16;
+                    if (2*k     < x_len) dot += (d * lo) * x[x_start + 2*k];
+                    if (2*k + 1 < x_len) dot += (d * hi) * x[x_start + 2*k + 1];
+                }
+            } else if (qtype == 7) { // Q5_1: [d:2][dmin:2][ql:16][qh:4] = 24 bytes, 32 elements
+                uint16_t dh, dmh;
+                std::memcpy(&dh, blk, 2);
+                std::memcpy(&dmh, blk + 2, 2);
+                float d = fp16_to_f32(dh);
+                float dmin = fp16_to_f32(dmh);
+                uint32_t qh_val;
+                std::memcpy(&qh_val, blk + 20, 4);
+                for (int k = 0; k < 16; ++k) {
+                    uint8_t q = blk[4 + k];
+                    int8_t lo = static_cast<int8_t>((q & 0xF) | (((qh_val >> k) & 1) << 4)) - 16;
+                    int8_t hi = static_cast<int8_t>((q >> 4) | (((qh_val >> (k+16)) & 1) << 4)) - 16;
+                    if (2*k < x_len) dot += (d * lo + dmin) * x[x_start + 2*k];
+                    if (2*k + 1 < x_len) dot += (d * hi + dmin) * x[x_start + 2*k + 1];
+                }
             } else if (qtype == 12) { // Q4_K: SIMD fused dequant+dot
                 uint16_t _dh, _dmh;
                 std::memcpy(&_dh, blk, 2);
@@ -818,12 +846,7 @@ void matvec_dequant(const uint8_t* A_q, const float* x, float* y,
                 }
             } else {
                 // Fallback: dequantize via dedicated functions or zeros
-                if (qtype == 6) { // Q5_0
-                    float qk[32];
-                    // Q5_0: [d:2][m:2][w:16][qh:16] approx
-                    dequantize_q5_k(blk, qk, 1);  // approximate
-                    for (int k = 0; k < x_len; ++k) dot += qk[k] * x[x_start + k];
-                } else if (qtype == 3) { // Q4_1
+                if (qtype == 3) { // Q4_1 (fallback only)
                     float qk[32];
                     dequantize_q4_0(blk, qk, 1);  // approximate
                     for (int k = 0; k < x_len; ++k) dot += qk[k] * x[x_start + k];

@@ -179,6 +179,7 @@ target_link_libraries(hesa-llm PRIVATE hesa_core)
 # -- HTTP Server (OpenAI-compatible API) --
 if(HESA_ENABLE_SERVER)
     set(HESA_SERVER_SRCS
+        src/server/main.cpp
         src/server/server.cpp
         src/server/openai_api.cpp
         src/server/chat_handler.cpp

@@ -241,7 +241,6 @@ Result<void> GGUFReader::read_metadata() {
 
 Result<void> GGUFReader::read_tensor_infos() {
     uint64_t off = data_offset_;
-    off = (off + 31) & ~static_cast<uint64_t>(31);
 
     for (uint64_t i = 0; i < n_tensors_; ++i) {
         if (off >= file_size_) break;
@@ -250,16 +249,15 @@ Result<void> GGUFReader::read_tensor_infos() {
         info.name = read_string(data_ + off, off);
         if (off >= file_size_) break;
 
-        info.dims.resize(read_val<uint32_t>(data_ + off)); off += 4;
-
-        int32_t dtype_raw = read_val<int32_t>(data_ + off); off += 4;
-        info.dtype = static_cast<GGUFType>(dtype_raw);
-
-        for (size_t d = 0; d < info.dims.size() && off + 8 <= file_size_; ++d) {
+        uint32_t n_dims = read_val<uint32_t>(data_ + off); off += 4;
+        info.dims.resize(n_dims);
+        for (uint32_t d = 0; d < n_dims && off + 8 <= file_size_; ++d) {
             info.dims[d] = read_val<int64_t>(data_ + off); off += 8;
         }
 
         if (off + 8 > file_size_) break;
+        int32_t dtype_raw = read_val<int32_t>(data_ + off); off += 4;
+        info.dtype = static_cast<GGUFType>(dtype_raw);
         info.offset = read_val<uint64_t>(data_ + off); off += 8;
 
         tensor_infos_.push_back(std::move(info));
@@ -377,6 +375,11 @@ Result<std::unique_ptr<Model>> Model::load(const std::string& path, Backend* bac
         meta.token_types = ia_types->second;
     }
 
+    // If vocab_size not explicitly provided, derive from tokenizer tokens
+    if (meta.vocab_size == 0 && !meta.vocab.empty()) {
+        meta.vocab_size = static_cast<int>(meta.vocab.size());
+    }
+
     model->metadata_ = meta;
 
     // Detach the reader's mmap and transfer ownership to the Model.
@@ -393,10 +396,11 @@ Result<std::unique_ptr<Model>> Model::load(const std::string& path, Backend* bac
     const uint8_t* data_start = base + reader.data_offset();
 
     for (const auto& ti : reader.tensors()) {
-        std::vector<int64_t> shape_reversed{ti.dims.rbegin(), ti.dims.rend()};
+        // Keep shape as stored in GGUF (e.g., [vocab, hidden] for embeddings)
+        std::vector<int64_t> shape = ti.dims;
 
         uint64_t nelem = 1;
-        for (auto d : ti.dims) nelem *= d;
+        for (auto d : shape) nelem *= d;
 
         Dtype dtype = gguf_to_hesa_dtype(ti.dtype);
         const uint8_t* weight_data = data_start + ti.offset;
@@ -404,10 +408,10 @@ Result<std::unique_ptr<Model>> Model::load(const std::string& path, Backend* bac
         Tensor t;
         if (dtype == Dtype::F32) {
             // Zero-copy: tensor data points directly into the mmap'd region
-            t = Tensor::make_from_external(const_cast<uint8_t*>(weight_data), dtype, shape_reversed);
+            t = Tensor::make_from_external(const_cast<uint8_t*>(weight_data), dtype, shape);
         } else if (dtype == Dtype::F16 || dtype == Dtype::BF16) {
             // Need to convert F16/BF16 -> F32, so allocate new memory
-            t = Tensor(Dtype::F32, shape_reversed, backend);
+            t = Tensor(Dtype::F32, shape, backend);
             const uint16_t* src = reinterpret_cast<const uint16_t*>(weight_data);
             float* dst = static_cast<float*>(t.data());
             for (uint64_t i = 0; i < nelem; ++i) {
@@ -428,7 +432,7 @@ Result<std::unique_ptr<Model>> Model::load(const std::string& path, Backend* bac
         } else {
             // Zero-copy for quantized types: reference mmap directly
             (void)nelem; // shape already encodes element count
-            t = Tensor::make_from_external(const_cast<uint8_t*>(weight_data), dtype, shape_reversed);
+            t = Tensor::make_from_external(const_cast<uint8_t*>(weight_data), dtype, shape);
         }
         t.set_name(ti.name);
         model->tensors_[ti.name] = std::move(t);
